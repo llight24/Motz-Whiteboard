@@ -1,0 +1,70 @@
+name: Build Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build installer
+        run: npm run package:win
+
+      - name: Build portable package
+        run: npm run package:win:portable
+
+      - name: Prepare release files
+        shell: pwsh
+        run: |
+          $version = node -p "require('./package.json').version"
+          $extensionVersion = node -p "require('./browser-extension/manifest.json').version"
+          New-Item -ItemType Directory -Force publish | Out-Null
+          Copy-Item "release/MOTZ白板-Setup-$version-x64.exe" publish/
+          Copy-Item "release/MOTZ白板-Portable-$version-x64.exe" publish/
+          $extensionFiles = Get-ChildItem browser-extension -Force
+          Compress-Archive -Path $extensionFiles.FullName -DestinationPath "publish/MOTZ-browser-extension-$extensionVersion.zip" -Force
+          Get-ChildItem publish -File |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content -Encoding utf8 "publish/SHA256SUMS-$version.txt"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: MOTZ-Windows-${{ github.ref_name }}
+          path: publish/*
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = ".github/release-notes/$tag.md"
+          $assets = (Get-ChildItem publish -File).FullName
+          if (Test-Path $notes) {
+            gh release create $tag @assets --title "MOTZ 白板 $tag" --notes-file $notes
+          } else {
+            gh release create $tag @assets --title "MOTZ 白板 $tag" --generate-notes
+          }

@@ -1,0 +1,103 @@
+{
+  "name": "motz-whiteboard",
+  "version": "0.3.81",
+  "description": "面向 CG 与视觉创作的本地参考素材库与无限白板。",
+  "author": "MOTZ",
+  "private": true,
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "electron:dev": "set ELECTRON_DEV_SERVER_URL=http://127.0.0.1:5173&& electron .",
+    "package:win": "npm run build && electron-builder --win nsis --x64",
+    "package:win:portable": "npm run build && electron-builder --win portable --x64 --config.win.artifactName=MOTZ白板-Portable-${version}-${arch}.${ext}",
+    "package:dir": "npm run build && electron-builder --win dir --x64",
+    "package:mac": "npm run build && electron-builder --mac"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "5.0.4",
+    "lucide-react": "^1.22.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "vite": "6.4.2"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.motz.whiteboard",
+    "productName": "MOTZ白板",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "build/icon.ico",
+      "build/icon.icns",
+      "build/icon.png",
+      "package.json"
+    ],
+    "asar": true,
+    "npmRebuild": false,
+    "fileAssociations": [
+      {
+        "ext": "motzboard",
+        "name": "MOTZ 白板文件",
+        "description": "可交换的 MOTZ 白板文件",
+        "icon": "icon.ico",
+        "role": "Editor"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": true,
+      "forceCodeSigning": false,
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "MOTZ白板-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "MOTZ白板",
+      "runAfterFinish": true
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "identity": null,
+      "category": "public.app-category.graphics-design",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "MOTZ白板-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "MOTZ白板-${version}-${arch}.${ext}"
+    }
+  }
+}

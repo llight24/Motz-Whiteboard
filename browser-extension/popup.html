@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>MOTZ 白板收集器</title>
+  </head>
+  <body>
+    <main>
+      <header>
+        <img src="icons/icon48.png" alt="" />
+        <div>
+          <strong>MOTZ 白板收集器</strong>
+          <span id="status">检测中...</span>
+          <small id="version"></small>
+        </div>
+      </header>
+      <p>拖动网页图片时会出现 MOTZ 收集框，松手即可保存到素材库或发送到当前白板。</p>
+      <button id="check" type="button">重新检测桌面端</button>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

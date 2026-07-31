@@ -1,0 +1,143 @@
+#motz-collector-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 160ms ease;
+  font-family:
+    Inter,
+    "Microsoft YaHei",
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+}
+
+#motz-collector-overlay.motz-collector-visible {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+#motz-collector-overlay .motz-collector-card {
+  box-sizing: border-box;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 268px;
+  min-height: 178px;
+  padding: 18px;
+  overflow: hidden;
+  border: 1px solid rgba(213, 226, 216, 0.34);
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(142, 171, 145, 0.96), rgba(77, 103, 86, 0.94)),
+    rgba(42, 56, 47, 0.94);
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.42),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  color: #f4f7f2;
+  user-select: none;
+  transform: translate(-50%, -50%) scale(0.98);
+  transform-origin: center;
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+#motz-collector-overlay.motz-collector-visible .motz-collector-card {
+  transform: scale(1);
+}
+
+#motz-collector-overlay .motz-collector-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  color: #eef4ec;
+  cursor: pointer;
+  font-size: 17px;
+  line-height: 20px;
+}
+
+#motz-collector-overlay .motz-collector-preview {
+  width: 132px;
+  height: 94px;
+  margin: 10px auto 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.64);
+  border-radius: 14px;
+  background-color: rgba(17, 22, 19, 0.18);
+  background-position: center;
+  background-size: cover;
+}
+
+#motz-collector-overlay .motz-collector-copy {
+  display: grid;
+  gap: 3px;
+  text-align: center;
+}
+
+#motz-collector-overlay .motz-collector-copy strong {
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: 0;
+}
+
+#motz-collector-overlay .motz-collector-copy span {
+  color: rgba(245, 249, 243, 0.82);
+  font-size: 13px;
+}
+
+#motz-collector-overlay .motz-collector-copy em {
+  color: rgba(245, 249, 243, 0.54);
+  font-size: 11px;
+  font-style: normal;
+}
+
+#motz-collector-overlay .motz-collector-targets {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+#motz-collector-overlay .motz-collector-zone {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  min-height: 38px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 12px;
+  background: rgba(19, 27, 23, 0.24);
+  color: #fbfdf8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+#motz-collector-overlay .motz-collector-zone:hover {
+  border-color: rgba(255, 255, 255, 0.72);
+  background: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+}
+
+#motz-collector-overlay .motz-collector-status {
+  min-height: 16px;
+  margin-top: 9px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 12px;
+  text-align: center;
+}
+
+#motz-collector-overlay .motz-collector-status[data-error="true"] {
+  color: #ffe0df;
+}

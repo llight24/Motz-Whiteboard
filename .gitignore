@@ -1,0 +1,32 @@
+# Dependencies and package-manager caches
+node_modules/
+.npm-cache/
+
+# Build output and release artifacts
+dist/
+release/
+
+# Local logs and temporary files
+*.log
+*.tmp
+*.bak
+.vite-test.*
+.DS_Store
+Thumbs.db
+
+# Local QA and prototype captures
+prototype-*.png
+qa-*.png
+design-qa.md
+AGENTS.md
+
+# Editor and OS state
+.idea/
+.vscode/
+*.suo
+*.user
+
+# Local environment files
+.env
+.env.*
+!.env.example

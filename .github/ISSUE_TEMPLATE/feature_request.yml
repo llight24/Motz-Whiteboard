@@ -1,0 +1,27 @@
+name: 功能建议
+description: 提议新的工作流或体验改进
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景
+      description: 请描述你在什么工作中遇到问题。
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 希望的解决方式
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 当前替代方案
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考软件或截图
