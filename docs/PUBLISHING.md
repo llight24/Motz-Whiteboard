@@ -17,7 +17,7 @@ git config --global user.email "你的 GitHub 邮箱或 noreply 邮箱"
 
 ```powershell
 git add .
-git commit -m "Initial release: MOTZ Whiteboard 0.3.81"
+git commit -m "Release: MOTZ Whiteboard 0.3.82"
 git remote add origin https://github.com/<OWNER>/motz-whiteboard.git
 git push -u origin main
 ```
@@ -28,13 +28,13 @@ git push -u origin main
 git@github.com:<OWNER>/motz-whiteboard.git
 ```
 
-## 发布 0.3.81
+## 发布 0.3.82
 
 确认仓库的 Actions 权限允许读写仓库内容，然后创建版本标签：
 
 ```powershell
-git tag -a v0.3.81 -m "MOTZ Whiteboard 0.3.81"
-git push origin v0.3.81
+git tag -a v0.3.82 -m "MOTZ Whiteboard 0.3.82"
+git push origin v0.3.82
 ```
 
 标签会触发 `.github/workflows/release-windows.yml`：
@@ -68,10 +68,10 @@ git push origin v0.3.81
 ## 当前本地发布文件
 
 ```text
-release/MOTZ-Whiteboard-Setup-0.3.81-x64.exe
-release/MOTZ-Whiteboard-Portable-0.3.81-x64.exe
+release/MOTZ-Whiteboard-Setup-0.3.82-x64.exe
+release/MOTZ-Whiteboard-Portable-0.3.82-x64.exe
 release/MOTZ-browser-extension-0.1.11.zip
-release/SHA256SUMS-0.3.81.txt
+release/SHA256SUMS-0.3.82.txt
 ```
 
 `release/` 已被 `.gitignore` 排除。这些文件应上传到 Release，不应使用 Git LFS 或直接提交到源码历史。

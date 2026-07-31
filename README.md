@@ -5,7 +5,7 @@
 
 面向 CG、概念设计与视觉创作的本地参考素材库与无限白板。
 
-[![Version](https://img.shields.io/badge/version-0.3.81-3f8cff)](../../releases/latest)
+[![Version](https://img.shields.io/badge/version-0.3.82-3f8cff)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-4a90e2)](../../releases/latest)
 [![Electron](https://img.shields.io/badge/Electron-31-5a9bd5)](https://www.electronjs.org/)
 [![Status](https://img.shields.io/badge/status-beta-d5a021)](#当前状态)
@@ -21,10 +21,10 @@
 
 | 文件 | 适用场景 |
 | --- | --- |
-| `MOTZ-Whiteboard-Setup-0.3.81-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
-| `MOTZ-Whiteboard-Portable-0.3.81-x64.exe` | 免安装便携版，直接运行 |
+| `MOTZ-Whiteboard-Setup-0.3.82-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
+| `MOTZ-Whiteboard-Portable-0.3.82-x64.exe` | 免安装便携版，直接运行 |
 | `MOTZ-browser-extension-0.1.11.zip` | Chrome / Edge 浏览器图片收集插件 |
-| `SHA256SUMS-0.3.81.txt` | 下载文件完整性校验 |
+| `SHA256SUMS-0.3.82.txt` | 下载文件完整性校验 |
 
 当前 Windows 构建尚未进行商业代码签名，首次启动时可能出现 SmartScreen 提示。
 

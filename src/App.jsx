@@ -3181,25 +3181,32 @@ function Workspace({
     deleteAssetsByIds([assetId]);
   }
 
-  function confirmDeleteAsset(assetId) {
-    const targetAsset = assetById.get(assetId);
-    if (!targetAsset) return;
+  function confirmDeleteAssets(assetIds) {
+    const targetIds = Array.from(new Set(Array.from(assetIds ?? []).filter((assetId) => assetById.has(assetId))));
+    const targetAssets = targetIds.map((assetId) => assetById.get(assetId)).filter(Boolean);
+    if (targetAssets.length === 0) return;
     setAssetMenu(null);
-    if (isAssetTrashed(targetAsset)) {
+    const targetLabel = targetAssets.length > 1 ? `选中的 ${targetAssets.length} 个素材` : `「${targetAssets[0].title}」`;
+    const allTrashed = targetAssets.every(isAssetTrashed);
+    if (allTrashed) {
       requestConfirm({
         title: "彻底删除素材",
-        message: `确定彻底删除「${targetAsset.title}」吗？素材库目录中的本地副本也会同时删除，此操作不能撤销。`,
+        message: `确定彻底删除${targetLabel}吗？素材库目录中的本地副本也会同时删除，此操作不能撤销。`,
         confirmLabel: "彻底删除",
-        onConfirm: () => deleteAssetById(assetId),
+        onConfirm: () => deleteAssetsByIds(targetIds),
       });
       return;
     }
     requestConfirm({
       title: "移到垃圾桶",
-      message: `确定将「${targetAsset.title}」移到垃圾桶吗？它也会从所有白板中移除。`,
+      message: `确定将${targetLabel}移到垃圾桶吗？它们也会从所有白板中移除。`,
       confirmLabel: "移到垃圾桶",
-      onConfirm: () => moveAssetsToTrash([assetId]),
+      onConfirm: () => moveAssetsToTrash(targetIds),
     });
+  }
+
+  function confirmDeleteAsset(assetId) {
+    confirmDeleteAssets([assetId]);
   }
 
   function showAssetMenu(event, asset) {
@@ -3655,22 +3662,7 @@ function Workspace({
   }
 
   function confirmDeleteSelectedAssets() {
-    if (selectedAssetIds.size === 0) return;
-    if (activeCollection === "trash") {
-      requestConfirm({
-        title: "彻底删除素材",
-        message: `确定彻底删除选中的 ${selectedAssetIds.size} 个素材吗？素材库目录中的本地副本也会同时删除，此操作不能撤销。`,
-        confirmLabel: "彻底删除",
-        onConfirm: () => deleteAssetsByIds(selectedAssetIds),
-      });
-      return;
-    }
-    requestConfirm({
-      title: "移到垃圾桶",
-      message: `确定将选中的 ${selectedAssetIds.size} 个素材移到垃圾桶吗？它们也会从所有白板中移除。`,
-      confirmLabel: "移到垃圾桶",
-      onConfirm: () => moveAssetsToTrash(selectedAssetIds),
-    });
+    confirmDeleteAssets(Array.from(selectedAssetIds));
   }
 
   function confirmEmptyTrash() {
@@ -4437,9 +4429,9 @@ function Workspace({
   const boardMenuTarget = boardMenu ? boards.find((board) => board.id === boardMenu.boardId) : null;
   const assetMenuTarget = assetMenu ? assetById.get(assetMenu.assetId) : null;
   const assetMenuTargetIds = assetMenu?.assetIds?.length ? assetMenu.assetIds : assetMenuTarget ? [assetMenuTarget.id] : [];
-  const assetMenuBoardTargets = assetMenuTargetIds
-    .map((assetId) => assetById.get(assetId))
-    .filter((asset) => isBoardFileAsset(asset) && !isAssetTrashed(asset));
+  const assetMenuTargets = assetMenuTargetIds.map((assetId) => assetById.get(assetId)).filter(Boolean);
+  const assetMenuBoardTargets = assetMenuTargets.filter((asset) => isBoardFileAsset(asset) && !isAssetTrashed(asset));
+  const assetMenuAllTrashed = assetMenuTargets.length > 0 && assetMenuTargets.every(isAssetTrashed);
   const tagsAvailableForInspector = inspectorAsset ? tags.filter((tag) => !inspectorAsset.tags.includes(tag)) : [];
 
   return (
@@ -5556,29 +5548,35 @@ function Workspace({
               {assetMenuBoardTargets.length > 1 ? `添加 ${assetMenuBoardTargets.length} 项入库` : "添加入库"}
             </button>
           ) : null}
-          {canRenameLibraryAsset(assetMenuTarget) ? (
+          {assetMenuTargetIds.length === 1 && canRenameLibraryAsset(assetMenuTarget) ? (
             <button onClick={() => startRenameAsset(assetMenuTarget)}>
               <Search size={14} />
               重命名文件
             </button>
           ) : null}
-          <button onClick={() => refreshAssetReferences([assetMenuTarget.id])}>
+          <button onClick={() => refreshAssetReferences(assetMenuTargetIds)}>
             <RefreshCw size={14} />
-            刷新此素材
+            {assetMenuTargetIds.length > 1 ? `刷新 ${assetMenuTargetIds.length} 项` : "刷新此素材"}
           </button>
           <button onClick={() => locateAssetFile(assetMenuTarget)}>
             <FolderOpen size={14} />
             定位文件
           </button>
-          {isAssetTrashed(assetMenuTarget) ? (
-            <button onClick={() => restoreAssetsByIds([assetMenuTarget.id])}>
+          {assetMenuAllTrashed ? (
+            <button onClick={() => restoreAssetsByIds(assetMenuTargetIds)}>
               <RefreshCw size={14} />
-              恢复素材
+              {assetMenuTargetIds.length > 1 ? `恢复 ${assetMenuTargetIds.length} 项` : "恢复素材"}
             </button>
           ) : null}
-          <button className="danger" onClick={() => confirmDeleteAsset(assetMenuTarget.id)}>
+          <button className="danger" onClick={() => confirmDeleteAssets(assetMenuTargetIds)}>
             <Trash2 size={14} />
-            {isAssetTrashed(assetMenuTarget) ? "彻底删除" : "移到垃圾桶"}
+            {assetMenuAllTrashed
+              ? assetMenuTargetIds.length > 1
+                ? `彻底删除 ${assetMenuTargetIds.length} 项`
+                : "彻底删除"
+              : assetMenuTargetIds.length > 1
+                ? `移动 ${assetMenuTargetIds.length} 项到垃圾桶`
+                : "移到垃圾桶"}
           </button>
         </div>
       ) : null}
