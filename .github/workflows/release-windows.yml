@@ -38,8 +38,8 @@ jobs:
           $version = node -p "require('./package.json').version"
           $extensionVersion = node -p "require('./browser-extension/manifest.json').version"
           New-Item -ItemType Directory -Force publish | Out-Null
-          Copy-Item "release/MOTZ白板-Setup-$version-x64.exe" publish/
-          Copy-Item "release/MOTZ白板-Portable-$version-x64.exe" publish/
+          Copy-Item "release/MOTZ白板-Setup-$version-x64.exe" "publish/MOTZ-Whiteboard-Setup-$version-x64.exe"
+          Copy-Item "release/MOTZ白板-Portable-$version-x64.exe" "publish/MOTZ-Whiteboard-Portable-$version-x64.exe"
           $extensionFiles = Get-ChildItem browser-extension -Force
           Compress-Archive -Path $extensionFiles.FullName -DestinationPath "publish/MOTZ-browser-extension-$extensionVersion.zip" -Force
           Get-ChildItem publish -File |

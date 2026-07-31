@@ -68,8 +68,8 @@ git push origin v0.3.81
 ## 当前本地发布文件
 
 ```text
-release/MOTZ白板-Setup-0.3.81-x64.exe
-release/MOTZ白板-Portable-0.3.81-x64.exe
+release/MOTZ-Whiteboard-Setup-0.3.81-x64.exe
+release/MOTZ-Whiteboard-Portable-0.3.81-x64.exe
 release/MOTZ-browser-extension-0.1.11.zip
 release/SHA256SUMS-0.3.81.txt
 ```

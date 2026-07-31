@@ -21,8 +21,8 @@
 
 | 文件 | 适用场景 |
 | --- | --- |
-| `MOTZ白板-Setup-0.3.81-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
-| `MOTZ白板-Portable-0.3.81-x64.exe` | 免安装便携版，直接运行 |
+| `MOTZ-Whiteboard-Setup-0.3.81-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
+| `MOTZ-Whiteboard-Portable-0.3.81-x64.exe` | 免安装便携版，直接运行 |
 | `MOTZ-browser-extension-0.1.11.zip` | Chrome / Edge 浏览器图片收集插件 |
 | `SHA256SUMS-0.3.81.txt` | 下载文件完整性校验 |
 
