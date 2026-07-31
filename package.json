@@ -3,6 +3,14 @@
   "version": "0.3.81",
   "description": "面向 CG 与视觉创作的本地参考素材库与无限白板。",
   "author": "MOTZ",
+  "homepage": "https://github.com/MotzifyStudio/Motz-Whiteboard#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MotzifyStudio/Motz-Whiteboard.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MotzifyStudio/Motz-Whiteboard/issues"
+  },
   "private": true,
   "type": "module",
   "main": "electron/main.cjs",
