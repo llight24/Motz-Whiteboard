@@ -5,7 +5,7 @@
 
 面向 CG、概念设计与视觉创作的本地参考素材库与无限白板。
 
-[![Version](https://img.shields.io/badge/version-0.3.82-3f8cff)](../../releases/latest)
+[![Version](https://img.shields.io/badge/version-0.3.83-3f8cff)](../../releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-4a90e2)](../../releases/latest)
 [![Electron](https://img.shields.io/badge/Electron-31-5a9bd5)](https://www.electronjs.org/)
 [![Status](https://img.shields.io/badge/status-beta-d5a021)](#当前状态)
@@ -21,10 +21,10 @@
 
 | 文件 | 适用场景 |
 | --- | --- |
-| `MOTZ-Whiteboard-Setup-0.3.82-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
-| `MOTZ-Whiteboard-Portable-0.3.82-x64.exe` | 免安装便携版，直接运行 |
+| `MOTZ-Whiteboard-Setup-0.3.83-x64.exe` | 常规安装，创建快捷方式并注册 `.motzboard` 文件 |
+| `MOTZ-Whiteboard-Portable-0.3.83-x64.exe` | 免安装便携版，直接运行 |
 | `MOTZ-browser-extension-0.1.11.zip` | Chrome / Edge 浏览器图片收集插件 |
-| `SHA256SUMS-0.3.82.txt` | 下载文件完整性校验 |
+| `SHA256SUMS-0.3.83.txt` | 下载文件完整性校验 |
 
 当前 Windows 构建尚未进行商业代码签名，首次启动时可能出现 SmartScreen 提示。
 
@@ -32,7 +32,7 @@
 
 - **参考素材库**：多库切换、嵌套分类、标签、颜色筛选、本地文件夹扫描与垃圾桶。
 - **无限白板**：平移、无级缩放、框选、多选、吸附、排列、复制粘贴、撤销与重做。
-- **图片与视频**：图片集中复制入库；视频采用本地引用，避免重复占用大量空间。
+- **图片与视频**：图片和视频都会复制到素材库，原文件移动或删除后仍可使用。
 - **浮窗参考**：无边框、可置顶、沉浸式工具栏，适合绘画和建模时保持参考可见。
 - **文字节点**：粘贴纯文字、使用系统字体、调整颜色，并通过边界直接缩放。
 - **可交换白板**：将排版保存为 `.motzboard` 文件，在其他电脑继续打开。
@@ -94,7 +94,8 @@ docs/images/        GitHub 页面图片
 
 - 素材库、白板和设置默认保存在本机。
 - 图片导入后会在素材库目录保留副本。
-- 视频默认保留本地引用，移动或删除原文件后需要刷新或重新定位。
+- 图片和视频导入后都会在素材库目录保留独立副本。
+- `.motzboard` 会内嵌当前白板使用的图片与视频，可发送给其他用户继续打开。
 - 外部 `.motzboard` 中的素材先进入“白板素材”，由用户决定是否正式添加入库。
 
 ## 当前状态

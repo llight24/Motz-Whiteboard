@@ -12,6 +12,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      SIGN_WINDOWS: ${{ secrets.WIN_CSC_LINK != '' }}
 
     steps:
       - name: Checkout
@@ -28,9 +30,15 @@ jobs:
 
       - name: Build installer
         run: npm run package:win
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
       - name: Build portable package
         run: npm run package:win:portable
+        env:
+          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
       - name: Prepare release files
         shell: pwsh
@@ -46,6 +54,17 @@ jobs:
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash)  $([IO.Path]::GetFileName($_.Path))" } |
             Set-Content -Encoding utf8 "publish/SHA256SUMS-$version.txt"
+
+      - name: Verify Windows signatures
+        if: ${{ env.SIGN_WINDOWS == 'true' }}
+        shell: pwsh
+        run: |
+          $executables = Get-ChildItem publish -Filter *.exe
+          $invalid = @($executables | Where-Object { (Get-AuthenticodeSignature $_.FullName).Status -ne "Valid" })
+          if ($invalid.Count -gt 0) {
+            $invalid | ForEach-Object { Write-Error "Invalid signature: $($_.Name)" }
+            exit 1
+          }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

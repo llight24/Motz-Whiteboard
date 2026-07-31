@@ -4,6 +4,8 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { Readable } = require("node:stream");
+const { pipeline } = require("node:stream/promises");
 const { fileURLToPath, pathToFileURL } = require("node:url");
 
 const isDev = process.env.ELECTRON_DEV_SERVER_URL;
@@ -200,11 +202,11 @@ function uniqueLibraryPath(sourcePath, folderName) {
   return targetPath;
 }
 
-function uniqueLibraryPathFromName(fileName, folderName) {
+function uniqueLibraryPathFromName(fileName, folderName, fallbackExt = ".png") {
   const targetDir = ensureLibraryDir(folderName);
   const parsed = path.parse(fileName || "web-image.png");
   const baseName = sanitizePathPart(parsed.name || "web-image");
-  const ext = imageExtensions.has(parsed.ext.toLowerCase()) ? parsed.ext : ".png";
+  const ext = mediaExtensions.has(parsed.ext.toLowerCase()) ? parsed.ext : fallbackExt;
   let targetPath = path.join(targetDir, `${baseName}${ext}`);
   let index = 1;
 
@@ -298,6 +300,38 @@ function createLibraryAsset(targetPath, index = 0, type = "导入", originalSour
   };
 }
 
+function createVideoLibraryAsset(
+  targetPath,
+  index = 0,
+  type = "导入",
+  originalSource = "",
+  note = "已复制到软件素材库。",
+  tags = ["视频", "本地"],
+  extra = {},
+) {
+  const stats = fs.statSync(targetPath);
+  const importedAt = new Date().toLocaleString("zh-CN", { hour12: false });
+  const mediaUrl = pathToFileURL(targetPath).toString();
+
+  return {
+    id: `video-${Date.now()}-${index}-${crypto.randomUUID()}`,
+    title: path.basename(targetPath, path.extname(targetPath)),
+    size: formatBytes(stats.size),
+    type,
+    image: mediaUrl,
+    mediaUrl,
+    mediaKind: "video",
+    tags: Array.from(new Set(["视频", ...tags])),
+    folder: extra.folder || "",
+    source: targetPath,
+    originalSource: originalSource || targetPath,
+    libraryCopy: true,
+    note,
+    created: importedAt,
+    ...extra,
+  };
+}
+
 function isPathInside(parentPath, childPath) {
   const parent = path.resolve(parentPath);
   const child = path.resolve(childPath);
@@ -326,27 +360,10 @@ function copyImageToLibrary(sourcePath, folderName, index = 0, type = "导入") 
   return createLibraryAsset(targetPath, index, type, sourcePath, "已复制到软件素材库。", ["本地"], { folder: folderName });
 }
 
-function createVideoReferenceAsset(sourcePath, index = 0, type = "视频引用", folderName = "") {
-  const stats = fs.statSync(sourcePath);
-  const importedAt = new Date().toLocaleString("zh-CN", { hour12: false });
-  const mediaUrl = pathToFileURL(sourcePath).toString();
-
-  return {
-    id: `video-${Date.now()}-${index}-${crypto.randomUUID()}`,
-    title: path.basename(sourcePath, path.extname(sourcePath)),
-    size: formatBytes(stats.size),
-    type,
-    image: mediaUrl,
-    mediaUrl,
-    mediaKind: "video",
-    tags: ["视频", "本地"],
-    folder: folderName,
-    source: sourcePath,
-    originalSource: sourcePath,
-    libraryCopy: false,
-    note: "引用本地视频文件，未复制到素材库。",
-    created: importedAt,
-  };
+function copyVideoToLibrary(sourcePath, folderName, index = 0, type = "导入") {
+  const targetPath = uniqueLibraryPath(sourcePath, folderName);
+  fs.copyFileSync(sourcePath, targetPath);
+  return createVideoLibraryAsset(targetPath, index, type, sourcePath, "已复制到软件素材库。", ["本地"], { folder: folderName });
 }
 
 function mediaKindForPath(filePath) {
@@ -384,7 +401,7 @@ function createAssetPatchFromPath(filePath) {
     mediaKind,
     mediaUrl: mediaKind === "video" ? mediaUrl : "",
     size: formatBytes(stats.size),
-    libraryCopy: mediaKind === "image" && isPathInside(getLibraryRoot(), filePath),
+    libraryCopy: isPathInside(getLibraryRoot(), filePath),
   };
 
   if (mediaKind === "image") {
@@ -480,6 +497,26 @@ function resolveMediaReference(entry) {
 
   if (fs.existsSync(originalPath)) {
     try {
+      if (entry?.mediaKind === "video" && !isPathInside(getLibraryRoot(), originalPath) && !entry?.boardFileAsset) {
+        const copied = copyVideoToLibrary(originalPath, entry?.folder || "", 0, entry?.type || "视频迁移");
+        return {
+          id: entry?.id,
+          status: "relinked",
+          path: entry?.path,
+          filePath: copied.source,
+          suggestedTitle: copied.title,
+          patch: {
+            source: copied.source,
+            image: copied.image,
+            mediaUrl: copied.mediaUrl,
+            mediaKind: "video",
+            size: copied.size,
+            libraryCopy: true,
+            originalSource: entry?.originalSource || originalPath,
+            note: entry?.note || "已将旧版视频引用复制到软件素材库。",
+          },
+        };
+      }
       return { id: entry?.id, status: "exists", path: entry?.path, ...createAssetPatchFromPath(originalPath) };
     } catch {
       return { id: entry?.id, status: "missing", path: entry?.path };
@@ -490,6 +527,26 @@ function resolveMediaReference(entry) {
   if (!replacementPath) return { id: entry?.id, status: "missing", path: entry?.path || originalPath };
 
   try {
+    if (entry?.mediaKind === "video" && !isPathInside(getLibraryRoot(), replacementPath) && !entry?.boardFileAsset) {
+      const copied = copyVideoToLibrary(replacementPath, entry?.folder || "", 0, entry?.type || "视频迁移");
+      return {
+        id: entry?.id,
+        status: "relinked",
+        path: entry?.path,
+        filePath: copied.source,
+        suggestedTitle: copied.title,
+        patch: {
+          source: copied.source,
+          image: copied.image,
+          mediaUrl: copied.mediaUrl,
+          mediaKind: "video",
+          size: copied.size,
+          libraryCopy: true,
+          originalSource: entry?.originalSource || originalPath,
+          note: entry?.note || "已将旧版视频引用复制到软件素材库。",
+        },
+      };
+    }
     return { id: entry?.id, status: "relinked", path: entry?.path, ...createAssetPatchFromPath(replacementPath) };
   } catch {
     return { id: entry?.id, status: "missing", path: entry?.path || originalPath };
@@ -499,7 +556,7 @@ function resolveMediaReference(entry) {
 function createIndexedAssetFromLibraryPath(filePath, index = 0) {
   const folderName = relativeLibraryFolder(filePath);
   if (isVideoPath(filePath)) {
-    return createVideoReferenceAsset(filePath, index, "视频引用", folderName);
+    return createVideoLibraryAsset(filePath, index, "库内文件", filePath, "从素材库文件夹刷新识别。", ["本地"], { folder: folderName });
   }
   return createLibraryAsset(filePath, index, "库内文件", filePath, "从素材库文件夹刷新识别。", ["本地"], { folder: folderName });
 }
@@ -510,7 +567,7 @@ function importPathsToLibrary(filePaths, folderName = "未分类", type = "导�
     .map((filePath, index) => {
       try {
         if (isVideoPath(filePath)) {
-          return createVideoReferenceAsset(filePath, index, "视频引用", folderName);
+          return copyVideoToLibrary(filePath, folderName, index, type);
         }
         return copyImageToLibrary(filePath, folderName, index, type);
       } catch {
@@ -530,6 +587,18 @@ function extensionFromContentType(contentType = "") {
     "image/bmp": ".bmp",
     "image/avif": ".avif",
     "image/tiff": ".tif",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
+    "video/x-msvideo": ".avi",
+    "video/x-ms-wmv": ".wmv",
+    "video/x-flv": ".flv",
+    "video/mpeg": ".mpeg",
+    "video/3gpp": ".3gp",
+    "video/3gpp2": ".3g2",
+    "video/mp2t": ".ts",
+    "video/ogg": ".ogv",
   };
   return map[normalized] || "";
 }
@@ -545,8 +614,17 @@ function fileNameFromUrl(remoteUrl, contentType = "", index = 0) {
 
   const parsed = path.parse(fileName || "");
   const contentExt = extensionFromContentType(contentType);
-  const ext = imageExtensions.has(parsed.ext.toLowerCase()) ? parsed.ext : contentExt || ".png";
-  return `${parsed.name || `web-image-${Date.now()}-${index}`}${ext}`;
+  const ext = mediaExtensions.has(parsed.ext.toLowerCase()) ? parsed.ext : contentExt || ".png";
+  const mediaLabel = videoExtensions.has(ext.toLowerCase()) ? "web-video" : "web-image";
+  return `${parsed.name || `${mediaLabel}-${Date.now()}-${index}`}${ext}`;
+}
+
+function fileNameFromUpload(fileName, contentType = "", index = 0) {
+  const parsed = path.parse(String(fileName || "").trim());
+  const contentExt = extensionFromContentType(contentType);
+  const ext = mediaExtensions.has(parsed.ext.toLowerCase()) ? parsed.ext : contentExt || ".png";
+  const mediaLabel = videoExtensions.has(ext.toLowerCase()) ? "local-video" : "local-image";
+  return `${sanitizePathPart(parsed.name || `${mediaLabel}-${Date.now()}-${index}`)}${ext}`;
 }
 
 function parseImageDataUrl(dataUrl) {
@@ -588,8 +666,13 @@ function importImageDataUrlToLibrary(item, folderName, index = 0) {
 function writeImageBufferToLibrary(buffer, fileName, folderName, index, type, originalSource, note, tags, extra = {}) {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
   const { storageFolder = folderName, ...assetExtra } = extra;
-  const targetPath = uniqueLibraryPathFromName(fileName, storageFolder);
+  const requestedExt = path.extname(fileName || "").toLowerCase();
+  const mediaKind = videoExtensions.has(requestedExt) ? "video" : "image";
+  const targetPath = uniqueLibraryPathFromName(fileName, storageFolder, mediaKind === "video" ? requestedExt : ".png");
   fs.writeFileSync(targetPath, buffer);
+  if (mediaKind === "video") {
+    return createVideoLibraryAsset(targetPath, index, type, originalSource, note, tags, { ...assetExtra, folder: folderName });
+  }
   return createLibraryAsset(targetPath, index, type, originalSource, note, tags, { ...assetExtra, folder: folderName });
 }
 
@@ -605,7 +688,7 @@ function boardAssetMetadata(asset) {
   const metadata = cloneSerializable(asset, {});
   delete metadata.image;
   delete metadata.mediaUrl;
-  if (metadata.mediaKind !== "video") delete metadata.source;
+  delete metadata.source;
   return metadata;
 }
 
@@ -622,16 +705,91 @@ function boardVideoSourcePath(asset) {
   const candidates = [asset?.source, asset?.mediaUrl, asset?.image, asset?.originalSource];
   for (const candidate of candidates) {
     const filePath = normalizeFileCheckPath(candidate);
-    if (filePath) return filePath;
+    if (filePath && fs.existsSync(filePath) && isVideoPath(filePath)) return filePath;
   }
   return "";
 }
 
-function makeBoardAssetFileName(asset, sourcePath, index) {
+function makeBoardAssetFileName(asset, sourcePath, index, mediaKind = "image") {
   const sourceExt = path.extname(sourcePath || "").toLowerCase();
-  const ext = imageExtensions.has(sourceExt) ? sourceExt : ".png";
-  const title = sanitizePathPart(asset?.title || `白板图片-${index + 1}`);
+  const allowedExtensions = mediaKind === "video" ? videoExtensions : imageExtensions;
+  const ext = allowedExtensions.has(sourceExt) ? sourceExt : mediaKind === "video" ? ".mp4" : ".png";
+  const title = sanitizePathPart(asset?.title || `白板${mediaKind === "video" ? "视频" : "图片"}-${index + 1}`);
   return `${title}${ext}`;
+}
+
+function writeAll(fileDescriptor, buffer) {
+  let offset = 0;
+  while (offset < buffer.length) {
+    const bytesWritten = fs.writeSync(fileDescriptor, buffer, offset, buffer.length - offset);
+    if (bytesWritten <= 0) throw new Error("无法写入白板文件");
+    offset += bytesWritten;
+  }
+}
+
+function appendFileToDescriptor(fileDescriptor, sourcePath) {
+  const sourceDescriptor = fs.openSync(sourcePath, "r");
+  const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+  try {
+    let position = 0;
+    while (true) {
+      const bytesRead = fs.readSync(sourceDescriptor, buffer, 0, buffer.length, position);
+      if (bytesRead <= 0) break;
+      writeAll(fileDescriptor, buffer.subarray(0, bytesRead));
+      position += bytesRead;
+    }
+  } finally {
+    fs.closeSync(sourceDescriptor);
+  }
+}
+
+function writeEmbeddedMediaToLibrary(sourceDescriptor, entry, options = {}) {
+  const length = Number(entry?.length);
+  const dataPosition = Number(entry?.dataPosition);
+  if (!Number.isSafeInteger(length) || length <= 0 || !Number.isSafeInteger(dataPosition) || dataPosition < 0) return null;
+
+  const {
+    folderName = "",
+    storageFolder = folderName,
+    index = 0,
+    type = "白板文件",
+    mediaKind = entry?.mediaKind === "video" ? "video" : "image",
+    originalSource = "",
+    note = "从 MOTZ 白板文件导入。",
+    tags = [],
+    extra = {},
+  } = options;
+  const fallbackExt = mediaKind === "video" ? ".mp4" : ".png";
+  const fallbackName = `白板${mediaKind === "video" ? "视频" : "图片"}-${index + 1}${fallbackExt}`;
+  const targetPath = uniqueLibraryPathFromName(entry?.fileName || fallbackName, storageFolder, fallbackExt);
+  const targetDescriptor = fs.openSync(targetPath, "w");
+  const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+
+  try {
+    let copied = 0;
+    while (copied < length) {
+      const bytesToRead = Math.min(buffer.length, length - copied);
+      const bytesRead = fs.readSync(sourceDescriptor, buffer, 0, bytesToRead, dataPosition + copied);
+      if (bytesRead <= 0) throw new Error("白板文件中的素材数据不完整");
+      writeAll(targetDescriptor, buffer.subarray(0, bytesRead));
+      copied += bytesRead;
+    }
+  } catch (error) {
+    fs.closeSync(targetDescriptor);
+    try {
+      fs.unlinkSync(targetPath);
+    } catch {
+      // Preserve the extraction error.
+    }
+    throw error;
+  }
+  fs.closeSync(targetDescriptor);
+
+  const assetExtra = { ...extra, folder: folderName };
+  if (mediaKind === "video") {
+    return createVideoLibraryAsset(targetPath, index, type, originalSource, note, tags, assetExtra);
+  }
+  return createLibraryAsset(targetPath, index, type, originalSource, note, tags, assetExtra);
 }
 
 function writeBoardPackage(filePath, payload) {
@@ -643,27 +801,20 @@ function writeBoardPackage(filePath, payload) {
   const embedded = [];
   const assets = requestedAssets.map((asset, index) => {
     const metadata = boardAssetMetadata(asset);
-    if (asset?.mediaKind === "video") {
-      return {
-        ...metadata,
-        mediaKind: "video",
-        source: boardVideoSourcePath(asset),
-        embeddedIndex: -1,
-      };
-    }
-
-    const sourcePath = boardImageSourcePath(asset);
+    const mediaKind = asset?.mediaKind === "video" ? "video" : "image";
+    const sourcePath = mediaKind === "video" ? boardVideoSourcePath(asset) : boardImageSourcePath(asset);
     if (!sourcePath) {
       return {
         ...metadata,
-        mediaKind: "image",
+        mediaKind,
         embeddedIndex: -1,
       };
     }
 
     const descriptor = {
       assetId: String(asset.id || ""),
-      fileName: makeBoardAssetFileName(asset, sourcePath, index),
+      fileName: makeBoardAssetFileName(asset, sourcePath, index, mediaKind),
+      mediaKind,
       length: fs.statSync(sourcePath).size,
       sourcePath,
     };
@@ -671,14 +822,14 @@ function writeBoardPackage(filePath, payload) {
     embedded.push(descriptor);
     return {
       ...metadata,
-      mediaKind: "image",
+      mediaKind,
       embeddedIndex,
     };
   });
 
   const header = {
     format: "motz-board",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     board,
     items,
@@ -692,20 +843,22 @@ function writeBoardPackage(filePath, payload) {
   lengthBuffer.writeUInt32LE(headerBuffer.length, 0);
   const descriptor = fs.openSync(filePath, "w");
   try {
-    fs.writeSync(descriptor, boardFileMagic);
-    fs.writeSync(descriptor, lengthBuffer);
-    fs.writeSync(descriptor, headerBuffer);
+    writeAll(descriptor, boardFileMagic);
+    writeAll(descriptor, lengthBuffer);
+    writeAll(descriptor, headerBuffer);
     embedded.forEach((entry) => {
-      fs.writeSync(descriptor, fs.readFileSync(entry.sourcePath));
+      appendFileToDescriptor(descriptor, entry.sourcePath);
     });
   } finally {
     fs.closeSync(descriptor);
   }
 
   return {
-    imageCount: embedded.length,
+    imageCount: assets.filter((asset) => asset.mediaKind !== "video" && asset.embeddedIndex >= 0).length,
+    videoCount: assets.filter((asset) => asset.mediaKind === "video" && asset.embeddedIndex >= 0).length,
     missingImageCount: assets.filter((asset) => asset.mediaKind !== "video" && asset.embeddedIndex < 0).length,
-    videoReferenceCount: assets.filter((asset) => asset.mediaKind === "video").length,
+    missingVideoCount: assets.filter((asset) => asset.mediaKind === "video" && asset.embeddedIndex < 0).length,
+    videoReferenceCount: 0,
   };
 }
 
@@ -741,19 +894,25 @@ function readBoardPackage(filePath) {
 
     const headerBuffer = readExactBuffer(descriptor, headerLength, prefixLength);
     const header = JSON.parse(headerBuffer.toString("utf8"));
-    if (header?.format !== "motz-board" || header?.version !== 1 || !header.board || !Array.isArray(header.items) || !Array.isArray(header.assets)) {
+    if (
+      header?.format !== "motz-board" ||
+      ![1, 2].includes(header?.version) ||
+      !header.board ||
+      !Array.isArray(header.items) ||
+      !Array.isArray(header.assets)
+    ) {
       throw new Error("不支持的 MOTZ 白板文件");
     }
 
     const embedded = Array.isArray(header.embedded) ? header.embedded : [];
-    const embeddedBuffers = [];
+    const embeddedEntries = [];
     let dataPosition = prefixLength + headerLength;
     embedded.forEach((entry) => {
       const length = Number(entry?.length);
       if (!Number.isSafeInteger(length) || length < 0 || dataPosition + length > stats.size) {
-        throw new Error("白板文件中的图片数据不完整");
+        throw new Error("白板文件中的素材数据不完整");
       }
-      embeddedBuffers.push(readExactBuffer(descriptor, length, dataPosition));
+      embeddedEntries.push({ ...entry, dataPosition });
       dataPosition += length;
     });
 
@@ -768,12 +927,59 @@ function readBoardPackage(filePath) {
         const tags = Array.from(new Set([...(Array.isArray(asset?.tags) ? asset.tags : []), "白板文件"]));
 
         if (asset?.mediaKind === "video") {
+          const embeddedIndex = Number(asset?.embeddedIndex);
+          const entry = Number.isInteger(embeddedIndex) ? embeddedEntries[embeddedIndex] : null;
+          if (entry) {
+            const imported = writeEmbeddedMediaToLibrary(descriptor, entry, {
+              folderName,
+              storageFolder: boardStorageFolder,
+              index,
+              type: "白板文件",
+              mediaKind: "video",
+              originalSource: asset.originalSource || "",
+              note: asset.note || "从 MOTZ 白板文件导入。",
+              tags,
+              extra: {
+                remoteSource: asset.remoteSource || "",
+                boardFileAsset: true,
+                boardFileSource: filePath,
+              },
+            });
+            if (imported) {
+              const importedAsset = {
+                ...asset,
+                ...imported,
+                title: asset.title || imported.title,
+                tags,
+                folder: folderName,
+                boardFileAsset: true,
+                boardFileSource: filePath,
+              };
+              if (oldId) idMap.set(oldId, importedAsset.id);
+              return importedAsset;
+            }
+          }
+
           const sourcePath = boardVideoSourcePath(asset);
           let importedAsset;
           if (sourcePath && fs.existsSync(sourcePath) && isVideoPath(sourcePath)) {
+            const targetPath = uniqueLibraryPath(sourcePath, boardStorageFolder);
+            fs.copyFileSync(sourcePath, targetPath);
             importedAsset = {
               ...asset,
-              ...createVideoReferenceAsset(sourcePath, index, "白板文件", folderName),
+              ...createVideoLibraryAsset(
+                targetPath,
+                index,
+                "白板文件",
+                asset.originalSource || sourcePath,
+                asset.note || "从旧版 MOTZ 白板路径引用恢复。",
+                tags,
+                {
+                  folder: folderName,
+                  boardFileAsset: true,
+                  boardFileSource: filePath,
+                },
+              ),
               title: asset.title || path.basename(sourcePath, path.extname(sourcePath)),
               tags,
               folder: folderName,
@@ -806,30 +1012,27 @@ function readBoardPackage(filePath) {
         }
 
         const embeddedIndex = Number(asset?.embeddedIndex);
-        const entry = Number.isInteger(embeddedIndex) ? embedded[embeddedIndex] : null;
-        const buffer = Number.isInteger(embeddedIndex) ? embeddedBuffers[embeddedIndex] : null;
-        if (!entry || !buffer) {
+        const entry = Number.isInteger(embeddedIndex) ? embeddedEntries[embeddedIndex] : null;
+        if (!entry) {
           missingImageCount += 1;
           return null;
         }
 
-        const imported = writeImageBufferToLibrary(
-          buffer,
-          entry.fileName || `${asset.title || `白板图片-${index + 1}`}.png`,
+        const imported = writeEmbeddedMediaToLibrary(descriptor, entry, {
           folderName,
+          storageFolder: boardStorageFolder,
           index,
-          "白板文件",
-          asset.originalSource || "",
-          asset.note || "从 MOTZ 白板文件导入。",
+          type: "白板文件",
+          mediaKind: "image",
+          originalSource: asset.originalSource || "",
+          note: asset.note || "从 MOTZ 白板文件导入。",
           tags,
-          {
-            folder: folderName,
-            storageFolder: boardStorageFolder,
+          extra: {
             remoteSource: asset.remoteSource || "",
             boardFileAsset: true,
             boardFileSource: filePath,
           },
-        );
+        });
         if (!imported) {
           missingImageCount += 1;
           return null;
@@ -877,6 +1080,58 @@ function readBoardPackage(filePath) {
     };
   } finally {
     fs.closeSync(descriptor);
+  }
+}
+
+function runBoardPackageSelfTest() {
+  const tempRoot = fs.mkdtempSync(path.join(app.getPath("temp"), "motz-board-test-"));
+  const imagePath = path.join(tempRoot, "sample.png");
+  const videoPath = path.join(tempRoot, "sample.mp4");
+  const boardPath = path.join(tempRoot, "sample.motzboard");
+  const imageBuffer = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
+  const videoBuffer = Buffer.concat([Buffer.from("00000018667479706d703432", "hex"), crypto.randomBytes(6 * 1024 * 1024)]);
+
+  try {
+    fs.writeFileSync(imagePath, imageBuffer);
+    fs.writeFileSync(videoPath, videoBuffer);
+    const copiedVideo = importPathsToLibrary([videoPath], "self-test", "导入测试")[0];
+    if (
+      !copiedVideo?.libraryCopy ||
+      !copiedVideo.source ||
+      path.resolve(copiedVideo.source) === path.resolve(videoPath) ||
+      !fs.readFileSync(copiedVideo.source).equals(videoBuffer)
+    ) {
+      throw new Error("Video import did not create a library copy");
+    }
+    const summary = writeBoardPackage(boardPath, {
+      board: { id: "self-test-board", name: "Self test" },
+      items: [
+        { id: "item-image", assetId: "asset-image", x: 10, y: 20, w: 100, h: 100 },
+        { id: "item-video", assetId: "asset-video", x: 120, y: 20, w: 160, h: 90 },
+      ],
+      assets: [
+        { id: "asset-image", title: "Image", source: imagePath, image: pathToFileURL(imagePath).toString(), mediaKind: "image" },
+        { ...copiedVideo, id: "asset-video", title: "Video" },
+      ],
+    });
+    const opened = readBoardPackage(boardPath);
+    const openedVideo = opened.assets.find((asset) => asset.mediaKind === "video");
+    const openedImage = opened.assets.find((asset) => asset.mediaKind !== "video");
+    if (summary.imageCount !== 1 || summary.videoCount !== 1 || opened.assets.length !== 2 || opened.items.length !== 2) {
+      throw new Error("Board package counts did not round-trip");
+    }
+    if (!openedVideo?.source || !fs.existsSync(openedVideo.source) || !fs.readFileSync(openedVideo.source).equals(videoBuffer)) {
+      throw new Error("Embedded video did not round-trip");
+    }
+    if (!openedImage?.source || !fs.existsSync(openedImage.source) || !fs.readFileSync(openedImage.source).equals(imageBuffer)) {
+      throw new Error("Embedded image did not round-trip");
+    }
+    return { ok: true, videoLibraryCopy: true, ...summary, openedAssets: opened.assets.length, openedItems: opened.items.length };
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 
@@ -930,27 +1185,54 @@ async function downloadImageToLibrary(remoteUrl, folderName, index = 0, original
   if (!response.ok) throw new Error(`Download failed: ${response.status}`);
 
   const contentType = response.headers.get("content-type") || "";
-  const buffer = Buffer.from(await response.arrayBuffer());
-  const hasImageExtension = imageExtensions.has(path.extname(url.pathname).toLowerCase());
-  if (!contentType.toLowerCase().startsWith("image/") && !hasImageExtension) {
-    const decoded = nativeImage.createFromBuffer(buffer);
-    const decodedSize = decoded.getSize();
-    if (!(decodedSize.width > 0 && decodedSize.height > 0)) {
-      throw new Error(`Not an image response: ${contentType || "unknown"}`);
-    }
+  const urlExt = path.extname(url.pathname).toLowerCase();
+  const isVideo = contentType.toLowerCase().startsWith("video/") || videoExtensions.has(urlExt);
+  const isImage = contentType.toLowerCase().startsWith("image/") || imageExtensions.has(urlExt);
+  if (!isVideo && !isImage) {
+    throw new Error(`Not a supported media response: ${contentType || "unknown"}`);
   }
 
   const fileName = fileNameFromUrl(remoteUrl, contentType, index);
-  return writeImageBufferToLibrary(
-    buffer,
-    fileName,
-    folderName,
+  const targetPath = uniqueLibraryPathFromName(fileName, folderName, isVideo ? ".mp4" : ".png");
+  try {
+    if (!response.body) throw new Error("Download response has no body");
+    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(targetPath));
+
+    if (!isVideo) {
+      const decoded = nativeImage.createFromPath(targetPath);
+      const decodedSize = decoded.getSize();
+      if (!(decodedSize.width > 0 && decodedSize.height > 0)) {
+        throw new Error(`Not a decodable image response: ${contentType || "unknown"}`);
+      }
+    }
+  } catch (error) {
+    try {
+      if (fs.existsSync(targetPath)) fs.unlinkSync(targetPath);
+    } catch {
+      // Preserve the download error.
+    }
+    throw error;
+  }
+
+  if (isVideo) {
+    return createVideoLibraryAsset(
+      targetPath,
+      index,
+      "网页视频",
+      originalSource || remoteUrl,
+      "从网页拖入并备份到软件素材库。",
+      ["网页", "视频"],
+      { remoteSource: remoteUrl, folder: folderName },
+    );
+  }
+  return createLibraryAsset(
+    targetPath,
     index,
     "网页图片",
     originalSource || remoteUrl,
     "从网页拖入并备份到软件素材库。",
     ["网页"],
-    { remoteSource: remoteUrl },
+    { remoteSource: remoteUrl, folder: folderName },
   );
 }
 
@@ -1258,6 +1540,16 @@ if (!hasSingleInstanceLock) {
 
 app.whenReady().then(() => {
   if (!hasSingleInstanceLock) return;
+  if (process.argv.includes("--self-test-board-package")) {
+    try {
+      console.log(JSON.stringify(runBoardPackageSelfTest()));
+      app.exit(0);
+    } catch (error) {
+      console.error(error?.stack || error?.message || String(error));
+      app.exit(1);
+    }
+    return;
+  }
   Menu.setApplicationMenu(null);
   startPluginBridgeServer();
   ipcMain.on("renderer-ready", (event) => {
@@ -1431,7 +1723,7 @@ app.whenReady().then(() => {
           const buffer = Buffer.from(item?.buffer ?? []);
           return writeImageBufferToLibrary(
             buffer,
-            item?.name || `web-image-${Date.now()}-${index}.png`,
+            fileNameFromUpload(item?.name, item?.type, index),
             folderName,
             index,
             item?.typeLabel || "网页拖拽",
@@ -1486,12 +1778,16 @@ app.whenReady().then(() => {
 
     const stats = fs.statSync(targetPath);
     const dimensions = readImageDimensions(targetPath);
+    const mediaKind = mediaKindForPath(targetPath);
+    const mediaUrl = pathToFileURL(targetPath).toString();
     return {
       ok: true,
       asset: {
         title: path.basename(targetPath, path.extname(targetPath)),
         source: targetPath,
-        image: pathToFileURL(targetPath).toString(),
+        image: mediaUrl,
+        mediaKind,
+        mediaUrl: mediaKind === "video" ? mediaUrl : "",
         size: formatBytes(stats.size),
         libraryCopy: true,
         ...(dimensions
@@ -1602,10 +1898,7 @@ app.whenReady().then(() => {
     const importedAssets = importPathsToLibrary(files, folderName, "本地文件夹").map((asset) => ({
       ...asset,
       tags: asset.mediaKind === "video" ? ["本地文件夹", "视频"] : ["本地文件夹"],
-      note:
-        asset.mediaKind === "video"
-          ? "从本地文件夹自动检索并引用视频，未复制到素材库。"
-          : "从本地文件夹自动检索并复制到软件素材库。",
+      note: "从本地文件夹自动检索并复制到软件素材库。",
     }));
 
     return {

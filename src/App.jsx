@@ -2663,7 +2663,7 @@ function Workspace({
     }
 
     const warnings = [];
-    if (result.videoReferenceCount > 0) warnings.push(`${result.videoReferenceCount} 个视频为路径引用`);
+    if (result.missingVideoCount > 0) warnings.push(`${result.missingVideoCount} 个视频未能打包`);
     if (result.missingImageCount > 0) warnings.push(`${result.missingImageCount} 张图片未能打包`);
     showToast(warnings.length > 0 ? `白板已保存；${warnings.join("，")}` : "白板文件已保存");
   }
@@ -3282,7 +3282,7 @@ function Workspace({
   }
 
   function canRenameLibraryAsset(asset) {
-    return Boolean(asset?.libraryCopy && asset?.source && !isAssetVideo(asset) && !/^https?:\/\//i.test(asset.source));
+    return Boolean(asset?.libraryCopy && asset?.source && !/^https?:\/\//i.test(asset.source));
   }
 
   function startRenameAsset(asset) {
@@ -3387,6 +3387,11 @@ function Workspace({
             size: asset.size,
             pixelWidth: asset.pixelWidth,
             pixelHeight: asset.pixelHeight,
+            folder: asset.folder,
+            type: asset.type,
+            note: asset.note,
+            originalSource: asset.originalSource,
+            boardFileAsset: isBoardFileAsset(asset),
           })),
         );
         const resolutionById = new Map((result?.items ?? []).filter((item) => item?.id).map((item) => [item.id, item]));
@@ -4200,16 +4205,24 @@ function Workspace({
       );
     }
 
-    if (imageFilesWithoutPaths.length > 0 && window.referenceBoard?.importImageData) {
+    const mediaFilesWithoutPaths = [
+      ...imageFilesWithoutPaths.map((file, index) => ({ file, remoteSource: imageUrlsForImport[index] || "" })),
+      ...videoFilesWithoutPaths.map((file, index) => ({ file, remoteSource: videoUrlsForImport[index] || "" })),
+    ];
+    if (mediaFilesWithoutPaths.length > 0 && window.referenceBoard?.importImageData) {
       const payload = await Promise.all(
-        imageFilesWithoutPaths.map(async (file, index) => ({
-          name: file.name || `${importMeta.clipboard ? "clipboard-image" : "web-image"}-${Date.now()}-${index}.png`,
+        mediaFilesWithoutPaths.map(async ({ file, remoteSource }, index) => ({
+          name:
+            file.name ||
+            `${isVideoFileLike(file) ? "web-video" : importMeta.clipboard ? "clipboard-image" : "web-image"}-${Date.now()}-${index}${
+              isVideoFileLike(file) ? ".mp4" : ".png"
+            }`,
           type: file.type || "",
           buffer: await file.arrayBuffer(),
           originalSource: importMeta.originalSource || importMeta.remoteSource || file.name,
-          remoteSource: imageUrlsForImport[index] || importMeta.remoteSource || "",
+          remoteSource: remoteSource || importMeta.remoteSource || "",
           typeLabel,
-          tags: tagsForImport,
+          tags: isVideoFileLike(file) ? Array.from(new Set(["视频", ...tagsForImport])) : tagsForImport,
           note: noteForImport,
         })),
       );
@@ -4217,43 +4230,13 @@ function Workspace({
       importedAssets.push(...(result.assets ?? []));
     }
 
-    if ((incomingFiles.length === 0 || importedAssets.length === 0) && imageUrlsForImport.length > 0 && window.referenceBoard?.importImageUrls) {
-      const result = await window.referenceBoard.importImageUrls(imageUrlsForImport, folderName, importMeta.originalSource || importMeta.remoteSource || "");
+    const mediaUrlsForImport = Array.from(new Set([...imageUrlsForImport, ...videoUrlsForImport]));
+    if ((incomingFiles.length === 0 || importedAssets.length === 0) && mediaUrlsForImport.length > 0 && window.referenceBoard?.importImageUrls) {
+      const result = await window.referenceBoard.importImageUrls(mediaUrlsForImport, folderName, importMeta.originalSource || importMeta.remoteSource || "");
       importedAssets.push(...(result.assets ?? []));
     }
 
-    if (incomingFiles.length === 0 && videoUrlsForImport.length > 0) {
-      importedAssets.push(
-        ...videoUrlsForImport.map((url, index) => {
-          let title = `web-video-${Date.now()}-${index}`;
-          try {
-            const urlPathName = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).at(-1) || "");
-            title = urlPathName ? urlPathName.replace(/\.[^.]+$/, "") : title;
-          } catch {
-            // Keep generated title when the URL cannot be parsed.
-          }
-          return {
-            id: `video-url-${Date.now()}-${index}`,
-            title,
-            size: "视频引用",
-            type: "视频引用",
-            image: url,
-            mediaUrl: url,
-            mediaKind: "video",
-            tags: Array.from(new Set(["视频", "网页", ...tagsForImport])),
-            folder: folderName,
-            source: url,
-            originalSource: importMeta.originalSource || url,
-            remoteSource: url,
-            note: "引用网页视频链接，未复制到素材库。",
-            created: "刚刚",
-            libraryCopy: false,
-          };
-        }),
-      );
-    }
-
-    if (videoFilesWithoutPaths.length > 0) {
+    if (videoFilesWithoutPaths.length > 0 && !window.referenceBoard?.importImageData) {
       importedAssets.push(
         ...videoFilesWithoutPaths.map((file, index) =>
           createTransientVideoAsset(file, index, folderName, { ...importMeta, typeLabel }, tagsForImport),
@@ -4880,7 +4863,7 @@ function Workspace({
                     onVideoMetadata={(event) => syncAssetVideoDimensions(asset, event.currentTarget)}
                   />
                   {isAssetVideo(asset) ? (
-                    <span className="video-badge" title="视频引用">
+                    <span className="video-badge" title="视频">
                       <Play size={12} />
                     </span>
                   ) : null}
@@ -7160,16 +7143,20 @@ function FloatingBoard({
       importedAssets.push(...(result.assets ?? []));
     }
 
-    if (imageFilesWithoutPaths.length > 0 && window.referenceBoard?.importImageData) {
+    const mediaFilesWithoutPaths = [
+      ...imageFilesWithoutPaths.map((file, index) => ({ file, remoteSource: imageUrlsForImport[index] || "" })),
+      ...videoFilesWithoutPaths.map((file, index) => ({ file, remoteSource: videoUrlsForImport[index] || "" })),
+    ];
+    if (mediaFilesWithoutPaths.length > 0 && window.referenceBoard?.importImageData) {
       const payload = await Promise.all(
-        imageFilesWithoutPaths.map(async (file, index) => ({
-          name: file.name || `drop-image-${Date.now()}-${index}.png`,
+        mediaFilesWithoutPaths.map(async ({ file, remoteSource }, index) => ({
+          name: file.name || `drop-${isVideoFileLike(file) ? "video" : "image"}-${Date.now()}-${index}.${isVideoFileLike(file) ? "mp4" : "png"}`,
           type: file.type || "",
           buffer: await file.arrayBuffer(),
           originalSource: importMeta.originalSource || importMeta.remoteSource || file.name,
-          remoteSource: imageUrlsForImport[index] || importMeta.remoteSource || "",
+          remoteSource: remoteSource || importMeta.remoteSource || "",
           typeLabel,
-          tags: tagsForImport,
+          tags: isVideoFileLike(file) ? Array.from(new Set(["视频", ...tagsForImport])) : tagsForImport,
           note: "从外部拖入浮窗白板并复制到素材库。",
         })),
       );
@@ -7177,43 +7164,13 @@ function FloatingBoard({
       importedAssets.push(...(result.assets ?? []));
     }
 
-    if ((incomingFiles.length === 0 || importedAssets.length === 0) && imageUrlsForImport.length > 0 && window.referenceBoard?.importImageUrls) {
-      const result = await window.referenceBoard.importImageUrls(imageUrlsForImport, "", importMeta.originalSource || importMeta.remoteSource || "");
+    const mediaUrlsForImport = Array.from(new Set([...imageUrlsForImport, ...videoUrlsForImport]));
+    if ((incomingFiles.length === 0 || importedAssets.length === 0) && mediaUrlsForImport.length > 0 && window.referenceBoard?.importImageUrls) {
+      const result = await window.referenceBoard.importImageUrls(mediaUrlsForImport, "", importMeta.originalSource || importMeta.remoteSource || "");
       importedAssets.push(...(result.assets ?? []));
     }
 
-    if (incomingFiles.length === 0 && videoUrlsForImport.length > 0) {
-      importedAssets.push(
-        ...videoUrlsForImport.map((url, index) => {
-          let title = `web-video-${Date.now()}-${index}`;
-          try {
-            const urlPathName = decodeURIComponent(new URL(url).pathname.split("/").filter(Boolean).at(-1) || "");
-            title = urlPathName ? urlPathName.replace(/\.[^.]+$/, "") : title;
-          } catch {
-            // Keep generated title when the URL cannot be parsed.
-          }
-          return {
-            id: `video-url-${Date.now()}-${index}`,
-            title,
-            size: "视频引用",
-            type: "视频引用",
-            image: url,
-            mediaUrl: url,
-            mediaKind: "video",
-            tags: Array.from(new Set(["视频", "网页", ...tagsForImport])),
-            folder: "",
-            source: url,
-            originalSource: importMeta.originalSource || url,
-            remoteSource: url,
-            note: "引用网页视频链接，未复制到素材库。",
-            created: "刚刚",
-            libraryCopy: false,
-          };
-        }),
-      );
-    }
-
-    if (videoFilesWithoutPaths.length > 0) {
+    if (videoFilesWithoutPaths.length > 0 && !window.referenceBoard?.importImageData) {
       importedAssets.push(
         ...videoFilesWithoutPaths.map((file, index) =>
           createTransientVideoAsset(file, index, "", { ...importMeta, typeLabel }, tagsForImport),

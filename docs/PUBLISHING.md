@@ -17,7 +17,7 @@ git config --global user.email "你的 GitHub 邮箱或 noreply 邮箱"
 
 ```powershell
 git add .
-git commit -m "Release: MOTZ Whiteboard 0.3.82"
+git commit -m "Release: MOTZ Whiteboard 0.3.83"
 git remote add origin https://github.com/<OWNER>/motz-whiteboard.git
 git push -u origin main
 ```
@@ -28,13 +28,13 @@ git push -u origin main
 git@github.com:<OWNER>/motz-whiteboard.git
 ```
 
-## 发布 0.3.82
+## 发布 0.3.83
 
 确认仓库的 Actions 权限允许读写仓库内容，然后创建版本标签：
 
 ```powershell
-git tag -a v0.3.82 -m "MOTZ Whiteboard 0.3.82"
-git push origin v0.3.82
+git tag -a v0.3.83 -m "MOTZ Whiteboard 0.3.83"
+git push origin v0.3.83
 ```
 
 标签会触发 `.github/workflows/release-windows.yml`：
@@ -68,10 +68,29 @@ git push origin v0.3.82
 ## 当前本地发布文件
 
 ```text
-release/MOTZ-Whiteboard-Setup-0.3.82-x64.exe
-release/MOTZ-Whiteboard-Portable-0.3.82-x64.exe
+release/MOTZ-Whiteboard-Setup-0.3.83-x64.exe
+release/MOTZ-Whiteboard-Portable-0.3.83-x64.exe
 release/MOTZ-browser-extension-0.1.11.zip
-release/SHA256SUMS-0.3.82.txt
+release/SHA256SUMS-0.3.83.txt
 ```
 
 `release/` 已被 `.gitignore` 排除。这些文件应上传到 Release，不应使用 Git LFS 或直接提交到源码历史。
+
+## Windows 代码签名
+
+`signAndEditExecutable` 只写入图标和版本资源，不等于可信数字签名。要减少 Windows SmartScreen 的未知发布者提示，需要购买受信任 CA 颁发的 OV 或 EV 代码签名证书。
+
+本地打包可设置：
+
+```powershell
+$env:CSC_LINK = "D:\证书\motz-signing.pfx"
+$env:CSC_KEY_PASSWORD = "证书密码"
+npm run package:win
+```
+
+GitHub Actions 可在仓库 Secrets 中配置：
+
+- `WIN_CSC_LINK`：PFX 文件的 Base64 内容或可下载地址。
+- `WIN_CSC_KEY_PASSWORD`：PFX 密码。
+
+工作流会把这两个 Secret 传给 electron-builder。未配置时仍会生成未签名测试包；配置后会验证安装包和便携包的 Authenticode 状态。
