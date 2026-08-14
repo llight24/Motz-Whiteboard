@@ -17,28 +17,44 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Use Node.js 20
-        uses: actions/setup-node@v4
+      - name: Use Node.js 22
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
 
       - name: Install dependencies
         run: npm ci
 
       - name: Build installer
-        run: npm run package:win
+        shell: pwsh
         env:
-          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
+            $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+          } else {
+            $env:CSC_LINK = $env:WIN_CSC_LINK
+            $env:CSC_KEY_PASSWORD = $env:WIN_CSC_KEY_PASSWORD
+          }
+          npm run package:win
 
       - name: Build portable package
-        run: npm run package:win:portable
+        shell: pwsh
         env:
-          CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK)) {
+            $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+          } else {
+            $env:CSC_LINK = $env:WIN_CSC_LINK
+            $env:CSC_KEY_PASSWORD = $env:WIN_CSC_KEY_PASSWORD
+          }
+          npm run package:win:portable
 
       - name: Prepare release files
         shell: pwsh
@@ -46,8 +62,12 @@ jobs:
           $version = node -p "require('./package.json').version"
           $extensionVersion = node -p "require('./browser-extension/manifest.json').version"
           New-Item -ItemType Directory -Force publish | Out-Null
-          Copy-Item "release/MOTZ白板-Setup-$version-x64.exe" "publish/MOTZ-Whiteboard-Setup-$version-x64.exe"
-          Copy-Item "release/MOTZ白板-Portable-$version-x64.exe" "publish/MOTZ-Whiteboard-Portable-$version-x64.exe"
+          $setup = Get-ChildItem release -File -Filter "*Setup-$version-x64.exe" | Select-Object -First 1
+          $portable = Get-ChildItem release -File -Filter "*Portable-$version-x64.exe" | Select-Object -First 1
+          if (-not $setup) { throw "Installer artifact was not produced." }
+          if (-not $portable) { throw "Portable artifact was not produced." }
+          Copy-Item $setup.FullName "publish/MOTZ-Whiteboard-Setup-$version-x64.exe"
+          Copy-Item $portable.FullName "publish/MOTZ-Whiteboard-Portable-$version-x64.exe"
           $extensionFiles = Get-ChildItem browser-extension -Force
           Compress-Archive -Path $extensionFiles.FullName -DestinationPath "publish/MOTZ-browser-extension-$extensionVersion.zip" -Force
           Get-ChildItem publish -File |
