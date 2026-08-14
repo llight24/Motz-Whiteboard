@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, screen, dialog, nativeImage } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell, screen, dialog, nativeImage, clipboard } = require("electron");
 const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -25,6 +25,7 @@ const appIconPath = path.join(__dirname, "..", "build", "icon.ico");
 const defaultLibraryId = "library-default";
 const boardFileMagic = Buffer.from("MOTZBOARD1\n", "utf8");
 const maxBoardHeaderBytes = 64 * 1024 * 1024;
+const boardClipboardPrefix = "MOTZ_BOARD_ITEMS:";
 let installedFontFamiliesCache = null;
 
 app.setName("MOTZ白板");
@@ -234,15 +235,16 @@ function imageThumbnailCacheDir() {
   return cacheDir;
 }
 
-function createImageThumbnail(filePath) {
+function createImageThumbnail(filePath, requestedMaxDimension = 640) {
   const normalizedPath = normalizeFileCheckPath(filePath);
   if (!normalizedPath || !isImagePath(normalizedPath) || !fs.existsSync(normalizedPath)) return null;
 
   const stats = fs.statSync(normalizedPath);
   if (!stats.isFile()) return null;
+  const maxDimension = [640, 1280, 2048, 3072].find((value) => Number(requestedMaxDimension) <= value) || 3072;
   const cacheKey = crypto
     .createHash("sha1")
-    .update(`${path.resolve(normalizedPath)}|${stats.size}|${stats.mtimeMs}|640|v1`)
+    .update(`${path.resolve(normalizedPath)}|${stats.size}|${stats.mtimeMs}|${maxDimension}|v1`)
     .digest("hex");
   const cacheDir = imageThumbnailCacheDir();
   const cachedJpegPath = path.join(cacheDir, `${cacheKey}.jpg`);
@@ -250,24 +252,27 @@ function createImageThumbnail(filePath) {
   const cachedPath = fs.existsSync(cachedJpegPath) ? cachedJpegPath : fs.existsSync(cachedPngPath) ? cachedPngPath : "";
 
   if (cachedPath) {
-    return { source: normalizedPath, thumbnail: pathToFileURL(cachedPath).toString() };
+    return { source: normalizedPath, thumbnail: pathToFileURL(cachedPath).toString(), maxDimension };
   }
 
   const image = nativeImage.createFromPath(normalizedPath);
   if (image.isEmpty()) return null;
   const size = image.getSize();
   if (!(size.width > 0) || !(size.height > 0)) return null;
-  const scale = Math.min(1, 640 / Math.max(size.width, size.height));
+  if (Math.max(size.width, size.height) <= maxDimension) {
+    return { source: normalizedPath, thumbnail: pathToFileURL(normalizedPath).toString(), maxDimension };
+  }
+  const scale = maxDimension / Math.max(size.width, size.height);
   const thumbnail = image.resize({
     width: Math.max(1, Math.round(size.width * scale)),
     height: Math.max(1, Math.round(size.height * scale)),
-    quality: "good",
+    quality: maxDimension > 640 ? "best" : "good",
   });
   const hasAlpha = new Set([".png", ".gif", ".webp", ".avif", ".tif", ".tiff"]).has(path.extname(normalizedPath).toLowerCase());
   const outputPath = hasAlpha ? cachedPngPath : cachedJpegPath;
-  const buffer = hasAlpha ? thumbnail.toPNG() : thumbnail.toJPEG(84);
+  const buffer = hasAlpha ? thumbnail.toPNG() : thumbnail.toJPEG(maxDimension > 640 ? 90 : 84);
   fs.writeFileSync(outputPath, buffer);
-  return { source: normalizedPath, thumbnail: pathToFileURL(outputPath).toString() };
+  return { source: normalizedPath, thumbnail: pathToFileURL(outputPath).toString(), maxDimension };
 }
 
 function createLibraryAsset(targetPath, index = 0, type = "导入", originalSource = "", note = "已复制到软件素材库。", tags = ["本地"], extra = {}) {
@@ -364,6 +369,34 @@ function copyVideoToLibrary(sourcePath, folderName, index = 0, type = "导入") 
   const targetPath = uniqueLibraryPath(sourcePath, folderName);
   fs.copyFileSync(sourcePath, targetPath);
   return createVideoLibraryAsset(targetPath, index, type, sourcePath, "已复制到软件素材库。", ["本地"], { folder: folderName });
+}
+
+function referenceMediaFromPath(sourcePath, folderName, index = 0, type = "本地引用") {
+  const extra = {
+    folder: folderName,
+    libraryCopy: false,
+    referencedSource: true,
+  };
+  if (isVideoPath(sourcePath)) {
+    return createVideoLibraryAsset(
+      sourcePath,
+      index,
+      type,
+      sourcePath,
+      "引用电脑中的原始视频，移动或删除原文件后需要重新定位。",
+      ["视频", "本地", "引用"],
+      extra,
+    );
+  }
+  return createLibraryAsset(
+    sourcePath,
+    index,
+    type,
+    sourcePath,
+    "引用电脑中的原始图片，移动或删除原文件后需要重新定位。",
+    ["本地", "引用"],
+    extra,
+  );
 }
 
 function mediaKindForPath(filePath) {
@@ -497,7 +530,7 @@ function resolveMediaReference(entry) {
 
   if (fs.existsSync(originalPath)) {
     try {
-      if (entry?.mediaKind === "video" && !isPathInside(getLibraryRoot(), originalPath) && !entry?.boardFileAsset) {
+      if (entry?.mediaKind === "video" && !entry?.referencedSource && !isPathInside(getLibraryRoot(), originalPath) && !entry?.boardFileAsset) {
         const copied = copyVideoToLibrary(originalPath, entry?.folder || "", 0, entry?.type || "视频迁移");
         return {
           id: entry?.id,
@@ -561,11 +594,15 @@ function createIndexedAssetFromLibraryPath(filePath, index = 0) {
   return createLibraryAsset(filePath, index, "库内文件", filePath, "从素材库文件夹刷新识别。", ["本地"], { folder: folderName });
 }
 
-function importPathsToLibrary(filePaths, folderName = "未分类", type = "导入") {
+function importPathsToLibrary(filePaths, folderName = "未分类", type = "导入", importMode = "copy") {
+  const shouldReference = importMode === "reference";
   return filePaths
     .filter((filePath) => isImagePath(filePath) || isVideoPath(filePath))
     .map((filePath, index) => {
       try {
+        if (shouldReference) {
+          return referenceMediaFromPath(filePath, folderName, index, type === "导入" ? "本地引用" : type);
+        }
         if (isVideoPath(filePath)) {
           return copyVideoToLibrary(filePath, folderName, index, type);
         }
@@ -1687,7 +1724,7 @@ app.whenReady().then(() => {
     const filePath = result.filePaths[0];
     return openBoardPackageResult(filePath);
   });
-  ipcMain.handle("import-image-files", async (event, folderName = "未分类") => {
+  ipcMain.handle("import-image-files", async (event, folderName = "未分类", importMode = "copy") => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     const result = await dialog.showOpenDialog(owner, {
       title: "选择参考素材",
@@ -1706,14 +1743,14 @@ app.whenReady().then(() => {
     return {
       canceled: false,
       folderName,
-      assets: importPathsToLibrary(result.filePaths, folderName, "导入"),
+      assets: importPathsToLibrary(result.filePaths, folderName, "导入", importMode),
     };
   });
-  ipcMain.handle("import-image-paths", (_event, filePaths, folderName = "未分类", typeLabel = "导入") => {
+  ipcMain.handle("import-image-paths", (_event, filePaths, folderName = "未分类", typeLabel = "导入", importMode = "copy") => {
     return {
       canceled: false,
       folderName,
-      assets: importPathsToLibrary(Array.isArray(filePaths) ? filePaths : [], folderName, typeLabel || "导入"),
+      assets: importPathsToLibrary(Array.isArray(filePaths) ? filePaths : [], folderName, typeLabel || "导入", importMode),
     };
   });
   ipcMain.handle("import-image-data", (_event, items, folderName = "未分类") => {
@@ -1838,6 +1875,47 @@ app.whenReady().then(() => {
     }
     return false;
   });
+  ipcMain.on("start-native-file-drag", (event, filePaths) => {
+    const normalizedPaths = Array.from(new Set((Array.isArray(filePaths) ? filePaths : [filePaths]).map(normalizeFileCheckPath).filter(Boolean))).filter(
+      (filePath) => fs.existsSync(filePath) && fs.statSync(filePath).isFile(),
+    );
+    try {
+      if (normalizedPaths.length === 0) return;
+
+      const iconSource = normalizedPaths.find(isImagePath) || appIconPath;
+      let dragIcon = nativeImage.createFromPath(iconSource);
+      if (dragIcon.isEmpty()) dragIcon = nativeImage.createFromPath(appIconPath);
+      if (!dragIcon.isEmpty()) {
+        const size = dragIcon.getSize();
+        dragIcon = size.width >= size.height
+          ? dragIcon.resize({ width: 96, quality: "good" })
+          : dragIcon.resize({ height: 96, quality: "good" });
+      }
+      event.sender.startDrag({ file: normalizedPaths[0], files: normalizedPaths, icon: dragIcon });
+    } finally {
+      if (!event.sender.isDestroyed()) event.sender.send("native-file-drag-ended");
+    }
+  });
+  ipcMain.on("write-board-clipboard", (event, payload) => {
+    try {
+      const serialized = typeof payload?.serialized === "string" ? payload.serialized : "";
+      if (!serialized) {
+        event.returnValue = false;
+        return;
+      }
+
+      const clipboardPayload = { text: `${boardClipboardPrefix}${serialized}` };
+      const imagePath = normalizeFileCheckPath(payload?.imagePath);
+      if (imagePath && fs.existsSync(imagePath) && isImagePath(imagePath)) {
+        const image = nativeImage.createFromPath(imagePath);
+        if (!image.isEmpty()) clipboardPayload.image = image;
+      }
+      clipboard.write(clipboardPayload);
+      event.returnValue = true;
+    } catch {
+      event.returnValue = false;
+    }
+  });
   ipcMain.handle("check-media-paths", (_event, filePaths) => {
     const uniquePaths = Array.from(new Set(Array.isArray(filePaths) ? filePaths : []));
     return Object.fromEntries(
@@ -1858,7 +1936,7 @@ app.whenReady().then(() => {
     const requestedEntries = Array.isArray(entries) ? entries.slice(0, 96) : [];
     for (const [index, entry] of requestedEntries.entries()) {
       try {
-        const result = createImageThumbnail(entry?.source);
+        const result = createImageThumbnail(entry?.source, entry?.maxDimension);
         if (result) results.push({ ...result, id: entry?.id || "" });
       } catch (error) {
         failures.push({ id: entry?.id || "", reason: error?.message || "thumbnail-failed" });
@@ -1881,7 +1959,7 @@ app.whenReady().then(() => {
       .filter(Boolean);
     return { libraryRoot, assets };
   });
-  ipcMain.handle("import-image-folder", async (event) => {
+  ipcMain.handle("import-image-folder", async (event, importMode = "copy") => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     const result = await dialog.showOpenDialog(owner, {
       title: "选择包含参考素材的文件夹",
@@ -1895,10 +1973,13 @@ app.whenReady().then(() => {
     const folderPath = result.filePaths[0];
     const folderName = path.basename(folderPath);
     const files = scanMediaFiles(folderPath);
-    const importedAssets = importPathsToLibrary(files, folderName, "本地文件夹").map((asset) => ({
+    const importedAssets = importPathsToLibrary(files, folderName, "本地文件夹", importMode).map((asset) => ({
       ...asset,
-      tags: asset.mediaKind === "video" ? ["本地文件夹", "视频"] : ["本地文件夹"],
-      note: "从本地文件夹自动检索并复制到软件素材库。",
+      tags: asset.mediaKind === "video" ? ["本地文件夹", "视频", ...(importMode === "reference" ? ["引用"] : [])] : ["本地文件夹", ...(importMode === "reference" ? ["引用"] : [])],
+      note:
+        importMode === "reference"
+          ? "从本地文件夹自动检索并引用原文件。"
+          : "从本地文件夹自动检索并复制到软件素材库。",
     }));
 
     return {

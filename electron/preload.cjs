@@ -35,11 +35,19 @@ contextBridge.exposeInMainWorld("referenceBoard", {
     return () => boardFileListeners.delete(callback);
   },
   getFilePath: (file) => webUtils?.getPathForFile?.(file) || file?.path || "",
-  importImageFiles: (folderName) => ipcRenderer.invoke("import-image-files", folderName),
-  importImagePaths: (filePaths, folderName, typeLabel) => ipcRenderer.invoke("import-image-paths", filePaths, folderName, typeLabel),
+  importImageFiles: (folderName, importMode) => ipcRenderer.invoke("import-image-files", folderName, importMode),
+  importImagePaths: (filePaths, folderName, typeLabel, importMode) => ipcRenderer.invoke("import-image-paths", filePaths, folderName, typeLabel, importMode),
   importImageData: (items, folderName) => ipcRenderer.invoke("import-image-data", items, folderName),
   importImageUrls: (urls, folderName, originalSource) => ipcRenderer.invoke("import-image-urls", urls, folderName, originalSource),
-  importImageFolder: () => ipcRenderer.invoke("import-image-folder"),
+  importImageFolder: (importMode) => ipcRenderer.invoke("import-image-folder", importMode),
+  startNativeFileDrag: (filePaths) => ipcRenderer.send("start-native-file-drag", filePaths),
+  onNativeFileDragEnd: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const listener = () => callback();
+    ipcRenderer.on("native-file-drag-ended", listener);
+    return () => ipcRenderer.removeListener("native-file-drag-ended", listener);
+  },
+  writeBoardClipboard: (payload) => ipcRenderer.sendSync("write-board-clipboard", payload),
   renameLibraryAsset: (sourcePath, nextTitle) => ipcRenderer.invoke("rename-library-asset", sourcePath, nextTitle),
   deleteLibraryFiles: (filePaths, libraryId) => ipcRenderer.invoke("delete-library-files", filePaths, libraryId),
   showItemInFolder: (filePath) => ipcRenderer.invoke("show-item-in-folder", filePath),

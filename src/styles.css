@@ -367,6 +367,73 @@ select:disabled {
   transform: none;
 }
 
+.asset-sort-control {
+  position: relative;
+}
+
+.asset-sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  min-width: 108px;
+  padding: 0 7px;
+  color: #d8dedb;
+  background: #2d2f2e;
+  border: 1px solid #3d403f;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.asset-sort-button:hover,
+.asset-sort-button.active {
+  color: #f1f5f3;
+  background: #343837;
+  border-color: #535a57;
+}
+
+.asset-sort-button span {
+  flex: 1;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.asset-sort-menu {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 5px);
+  right: 0;
+  display: grid;
+  width: 132px;
+  padding: 5px;
+  background: rgba(35, 38, 37, 0.99);
+  border: 1px solid #555c58;
+  border-radius: 6px;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.38);
+}
+
+.asset-sort-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 9px;
+  color: #cbd2ce;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.asset-sort-menu button:hover {
+  color: #ffffff;
+  background: #3c4240;
+}
+
+.asset-sort-menu button.active {
+  color: #bcebd3;
+  background: #30423a;
+}
+
 .search-box {
   display: flex;
   align-items: center;
@@ -999,6 +1066,22 @@ select:disabled {
   display: block;
 }
 
+.board-media-host {
+  position: absolute;
+  inset: 0;
+  display: block;
+  overflow: hidden;
+  background: #171a19;
+}
+
+.board-media-host > img,
+.board-media-host > video,
+.board-media-host > .deferred-media-placeholder {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
 .asset-color-strip {
   position: absolute;
   right: 0;
@@ -1611,6 +1694,7 @@ select:disabled {
   min-height: 0;
   flex: 1;
   overflow: hidden;
+  isolation: isolate;
   background:
     radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.08) 1px, transparent 0) 0 0 / 28px 28px,
     #202222;
@@ -1641,6 +1725,26 @@ select:disabled {
   width: 1180px;
   height: 760px;
   transform-origin: 0 0;
+  transform-style: flat;
+  backface-visibility: hidden;
+}
+
+.canvas-surface.viewport-paint-reset,
+.floating-surface.viewport-paint-reset {
+  opacity: 0.99999;
+}
+
+.viewport-transforming .board-item.selected,
+.viewport-transforming .board-note.selected,
+.viewport-transforming .floating-item.selected,
+.viewport-transforming .floating-note.selected {
+  outline-color: transparent;
+}
+
+.viewport-transforming .selection-handles,
+.viewport-transforming .group-selection-frame,
+.viewport-transforming .text-node-toolbar {
+  visibility: hidden;
 }
 
 .canvas-floating-launch {
@@ -3101,6 +3205,175 @@ select:disabled {
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.42);
 }
 
+.settings-dialog,
+.setup-dialog {
+  display: grid;
+  gap: 18px;
+  width: min(520px, calc(100vw - 40px));
+  padding: 18px;
+  color: #eef2f0;
+  background: #292c2b;
+  border: 1px solid #565b59;
+  border-radius: 8px;
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.48);
+}
+
+.setup-dialog {
+  width: min(560px, calc(100vw - 40px));
+}
+
+.onboarding-backdrop {
+  z-index: 100;
+  background: rgba(10, 12, 11, 0.82);
+}
+
+.setup-dialog-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.setup-dialog-heading p,
+.setup-dialog-heading h2 {
+  margin: 0;
+}
+
+.setup-dialog-heading p,
+.dialog-title span,
+.settings-section-heading span,
+.settings-note {
+  color: #929c97;
+  font-size: 11px;
+}
+
+.setup-dialog-heading h2 {
+  margin-top: 2px;
+  font-size: 19px;
+  letter-spacing: 0;
+}
+
+.setup-dialog > label,
+.settings-field,
+.settings-section {
+  display: grid;
+  gap: 8px;
+}
+
+.setup-dialog > label > span,
+.settings-field > span,
+.import-mode-options legend {
+  color: #aeb7b3;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.setup-dialog > label > input {
+  height: 36px;
+  padding: 0 10px;
+  color: #fff;
+  background: #1f2120;
+  border: 1px solid #151616;
+  border-radius: 5px;
+  outline: 0;
+}
+
+.setup-dialog > label > input:focus {
+  border-color: #65a8ff;
+}
+
+.settings-section {
+  gap: 16px;
+}
+
+.settings-section-heading {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #3d413f;
+}
+
+.path-picker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 40px;
+  padding: 0 10px;
+  color: #bdc6c2;
+  text-align: left;
+  background: #202322;
+  border: 1px solid #414643;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.path-picker strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-picker > span {
+  color: #77aef4;
+  font-size: 11px;
+}
+
+.import-mode-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0;
+  border: 0;
+}
+
+.import-mode-options legend {
+  grid-column: 1 / -1;
+  margin-bottom: 8px;
+}
+
+.import-mode-options > label {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  min-height: 76px;
+  padding: 12px;
+  color: #aeb7b3;
+  background: #202322;
+  border: 1px solid #414643;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.import-mode-options > label.active {
+  color: #dfe9e4;
+  background: #29332f;
+  border-color: #5d8f77;
+}
+
+.import-mode-options input {
+  margin: 3px 0 0;
+  accent-color: #66aa88;
+}
+
+.import-mode-options label > span {
+  display: grid;
+  gap: 5px;
+}
+
+.import-mode-options small {
+  color: #8f9994;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.settings-note {
+  margin: -4px 0 0;
+  line-height: 1.5;
+}
+
 .dialog-title,
 .dialog-actions {
   display: flex;
@@ -3303,6 +3576,7 @@ select:disabled {
   inset: 0;
   overflow: hidden;
   background: #111312;
+  isolation: isolate;
   scrollbar-width: none;
 }
 
@@ -3315,6 +3589,8 @@ select:disabled {
   width: max(100vw, 1180px);
   height: max(100vh, 760px);
   transform-origin: 0 0;
+  transform-style: flat;
+  backface-visibility: hidden;
 }
 
 .floating-item,

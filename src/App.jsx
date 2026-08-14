@@ -1,6 +1,7 @@
 import {
   AlignCenter,
   Archive,
+  ArrowDownUp,
   BadgeInfo,
   ChevronDown,
   ChevronLeft,
@@ -14,7 +15,9 @@ import {
   FolderPlus,
   Film,
   FileUp,
+  HardDrive,
   Images,
+  Link2,
   LibraryBig,
   Maximize2,
   MessageSquareText,
@@ -59,7 +62,7 @@ const boardTones = ["blue", "violet", "green", "amber"];
 
 const initialBoardItems = {};
 const defaultLibraryId = "library-default";
-const initialLibraries = [{ id: defaultLibraryId, name: "默认库", root: "" }];
+const initialLibraries = [{ id: defaultLibraryId, name: "默认库", root: "", importMode: "copy" }];
 const storedStateWriteDelay = 320;
 const boardHistoryLimit = 80;
 const initialAssetRenderLimit = 64;
@@ -67,6 +70,13 @@ const assetRenderBatchSize = 48;
 const pendingColorAnalysisAssetIds = new Set();
 const deferredMediaCallbacks = new WeakMap();
 let deferredMediaObserver = null;
+const boardMediaVisibilityCallbacks = new WeakMap();
+const boardMediaPreviewCache = new Map();
+const boardMediaPreviewSubscribers = new Map();
+const pendingBoardMediaPreviews = new Map();
+let boardMediaVisibilityObserver = null;
+let boardMediaPreviewTimer = 0;
+let boardMediaPreviewRequestActive = false;
 let installedNoteFontOptionsCache = null;
 let installedNoteFontOptionsRequest = null;
 
@@ -573,6 +583,19 @@ function assetPathKeys(asset) {
   return [asset?.source, asset?.mediaUrl, asset?.image, asset?.originalSource].map(normalizePathKey).filter(Boolean);
 }
 
+function assetIdsFromDroppedFiles(files, assets) {
+  const droppedPaths = new Set(
+    Array.from(files ?? [])
+      .map(localPathFromFile)
+      .map(normalizePathKey)
+      .filter(Boolean),
+  );
+  if (droppedPaths.size === 0) return [];
+  return assets
+    .filter((asset) => assetPathKeys(asset).some((pathKey) => droppedPaths.has(pathKey)))
+    .map((asset) => asset.id);
+}
+
 function basenameWithoutExtension(value) {
   let text = String(value || "").trim().split(/[?#]/)[0];
   if (/^file:\/\//i.test(text)) {
@@ -597,6 +620,52 @@ function formatFileSize(size) {
     unitIndex += 1;
   }
   return `${value >= 10 || unitIndex === 0 ? Math.round(value) : value.toFixed(1)} ${units[unitIndex]}`;
+}
+
+function parseAssetBytes(value) {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB)$/i);
+  if (!match) return 0;
+  const units = { B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 };
+  return Number(match[1]) * units[match[2].toUpperCase()];
+}
+
+function assetCreatedTimestamp(asset) {
+  const value = String(asset?.created || "").trim();
+  if (!value || value === "刚刚") return Number.MAX_SAFE_INTEGER;
+  const normalized = value.replace(/年|月/g, "/").replace(/日/g, "").replace(/-/g, "/");
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortAssets(items, mode) {
+  return items
+    .map((asset, index) => ({ asset, index }))
+    .sort((leftEntry, rightEntry) => {
+      const left = leftEntry.asset;
+      const right = rightEntry.asset;
+      let result = 0;
+      if (mode === "name") result = String(left.title || "").localeCompare(String(right.title || ""), "zh-Hans-CN", { numeric: true });
+      if (mode === "oldest") result = assetCreatedTimestamp(left) - assetCreatedTimestamp(right);
+      if (mode === "size") result = parseAssetBytes(right.size) - parseAssetBytes(left.size);
+      if (mode === "resolution") {
+        result = Number(right.pixelWidth || 0) * Number(right.pixelHeight || 0) - Number(left.pixelWidth || 0) * Number(left.pixelHeight || 0);
+      }
+      if (!mode || mode === "recent") result = assetCreatedTimestamp(right) - assetCreatedTimestamp(left);
+      return result || leftEntry.index - rightEntry.index;
+    })
+    .map((entry) => entry.asset);
+}
+
+function hasExistingWorkspace() {
+  try {
+    return ["reference-board-libraries", "reference-board-assets", "reference-board-folders", "reference-board-boards", "reference-board-items"].some(
+      (key) => window.localStorage.getItem(key),
+    );
+  } catch {
+    return false;
+  }
 }
 
 function createTransientVideoAsset(file, index = 0, folderName = "", metadata = {}, tags = []) {
@@ -697,6 +766,128 @@ function getAssetCheckPath(asset) {
   return [asset.source, asset.mediaUrl, asset.image, asset.originalSource].find(isCheckableLocalPath) || "";
 }
 
+function observeBoardMediaVisibility(element, callback) {
+  if (!element || typeof callback !== "function" || typeof IntersectionObserver === "undefined") {
+    callback?.(true);
+    return () => {};
+  }
+
+  if (!boardMediaVisibilityObserver) {
+    boardMediaVisibilityObserver = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => boardMediaVisibilityCallbacks.get(entry.target)?.(entry.isIntersecting));
+      },
+      { rootMargin: "640px" },
+    );
+  }
+
+  boardMediaVisibilityCallbacks.set(element, callback);
+  boardMediaVisibilityObserver.observe(element);
+  return () => {
+    boardMediaVisibilityCallbacks.delete(element);
+    boardMediaVisibilityObserver?.unobserve(element);
+  };
+}
+
+function boardMediaPreviewDimension(item, zoom) {
+  const deviceScale = Math.min(2, Math.max(1, Number(window.devicePixelRatio) || 1));
+  const requested = Math.max(Number(item?.width) || 1, Number(item?.height) || 1) * Math.max(0.01, zoom) * deviceScale * 1.12;
+  return [640, 1280, 2048, 3072].find((dimension) => requested <= dimension) || 0;
+}
+
+function viewportTransform(offset, zoom) {
+  const x = Number.isFinite(Number(offset?.x)) ? Number(offset.x) : 0;
+  const y = Number.isFinite(Number(offset?.y)) ? Number(offset.y) : 0;
+  const scale = Number.isFinite(Number(zoom)) ? Number(zoom) : 1;
+  return `translate3d(${x}px, ${y}px, 0) scale(${scale})`;
+}
+
+function startViewportComposite(host) {
+  host?.classList.add("viewport-transforming");
+}
+
+function settleViewportComposite(host, surface, applyTransform) {
+  window.requestAnimationFrame(() => {
+    applyTransform?.();
+    if (surface) {
+      surface.classList.remove("viewport-paint-reset");
+      // Reading layout between class changes gives Chromium a clean damage region
+      // before the decoded LOD image is swapped into the transformed surface.
+      void surface.offsetWidth;
+      surface.classList.add("viewport-paint-reset");
+    }
+    window.requestAnimationFrame(() => {
+      surface?.classList.remove("viewport-paint-reset");
+      host?.classList.remove("viewport-transforming");
+    });
+  });
+}
+
+function notifyBoardMediaPreview(key, value) {
+  const subscribers = boardMediaPreviewSubscribers.get(key);
+  boardMediaPreviewSubscribers.delete(key);
+  subscribers?.forEach((callback) => callback(value));
+}
+
+async function flushBoardMediaPreviewQueue() {
+  if (boardMediaPreviewRequestActive || pendingBoardMediaPreviews.size === 0) return;
+  const getMediaThumbnails = window.referenceBoard?.getMediaThumbnails;
+  if (typeof getMediaThumbnails !== "function") {
+    pendingBoardMediaPreviews.forEach((_entry, key) => {
+      boardMediaPreviewCache.set(key, "");
+      notifyBoardMediaPreview(key, "");
+    });
+    pendingBoardMediaPreviews.clear();
+    return;
+  }
+
+  boardMediaPreviewRequestActive = true;
+  const batch = Array.from(pendingBoardMediaPreviews.entries()).slice(0, 4);
+  batch.forEach(([key]) => pendingBoardMediaPreviews.delete(key));
+  try {
+    const response = await getMediaThumbnails(
+      batch.map(([key, entry]) => ({ id: key, source: entry.source, maxDimension: entry.maxDimension })),
+    );
+    const resultByKey = new Map((response?.items ?? []).map((entry) => [entry.id, entry.thumbnail || ""]));
+    batch.forEach(([key]) => {
+      const value = resultByKey.get(key) || "";
+      boardMediaPreviewCache.set(key, value);
+      notifyBoardMediaPreview(key, value);
+    });
+  } catch {
+    batch.forEach(([key]) => {
+      boardMediaPreviewCache.set(key, "");
+      notifyBoardMediaPreview(key, "");
+    });
+  } finally {
+    boardMediaPreviewRequestActive = false;
+    if (pendingBoardMediaPreviews.size > 0) {
+      window.clearTimeout(boardMediaPreviewTimer);
+      boardMediaPreviewTimer = window.setTimeout(flushBoardMediaPreviewQueue, 18);
+    }
+  }
+}
+
+function requestBoardMediaPreview(source, maxDimension, callback) {
+  const key = `${source}|${maxDimension}`;
+  if (boardMediaPreviewCache.has(key)) {
+    callback(boardMediaPreviewCache.get(key));
+    return () => {};
+  }
+
+  const subscribers = boardMediaPreviewSubscribers.get(key) ?? new Set();
+  subscribers.add(callback);
+  boardMediaPreviewSubscribers.set(key, subscribers);
+  pendingBoardMediaPreviews.set(key, { source, maxDimension });
+  window.clearTimeout(boardMediaPreviewTimer);
+  boardMediaPreviewTimer = window.setTimeout(flushBoardMediaPreviewQueue, 0);
+  return () => {
+    const current = boardMediaPreviewSubscribers.get(key);
+    current?.delete(callback);
+    if (current?.size === 0) boardMediaPreviewSubscribers.delete(key);
+  };
+}
+
 function videoMimeTypeFromSource(value) {
   const extension = extensionFromName(value);
   const map = {
@@ -772,6 +963,7 @@ function MediaElement({
 
   return (
     <img
+      key={src}
       className={className || undefined}
       src={src}
       alt={alt}
@@ -816,7 +1008,7 @@ function revealVideoFirstFrame(video) {
   });
 }
 
-function InlineVideoMedia({ asset, alt = "", preload = "metadata", onImageLoad, onVideoMetadata, onMediaError }) {
+function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = false, preload = "metadata", onImageLoad, onVideoMetadata, onMediaError }) {
   const videoRef = useRef(null);
   const hideTimerRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -837,7 +1029,16 @@ function InlineVideoMedia({ asset, alt = "", preload = "metadata", onImageLoad, 
   }, [muted, volume]);
 
   if (!isAssetVideo(asset)) {
-    return <MediaElement asset={asset} alt={alt} onImageLoad={onImageLoad} onMediaError={onMediaError} />;
+    return (
+      <MediaElement
+        asset={asset}
+        alt={alt}
+        mediaUrl={mediaUrl}
+        waitForMediaUrl={waitForMediaUrl}
+        onImageLoad={onImageLoad}
+        onMediaError={onMediaError}
+      />
+    );
   }
 
   const src = getAssetMediaUrl(asset);
@@ -1039,6 +1240,89 @@ function InlineVideoMedia({ asset, alt = "", preload = "metadata", onImageLoad, 
         </div>
       </div>
     </div>
+  );
+}
+
+function BoardMedia({ asset, item, zoom, alt = "", onImageLoad, onVideoMetadata, onMediaError }) {
+  const hostRef = useRef(null);
+  const visibilityHideTimerRef = useRef(0);
+  const source = getAssetCheckPath(asset);
+  const previewDimension = boardMediaPreviewDimension(item, zoom);
+  const [visible, setVisible] = useState(false);
+  const [previewState, setPreviewState] = useState(() => ({ source: "", dimension: -1, url: "" }));
+
+  useEffect(() => {
+    const stopObserving = observeBoardMediaVisibility(hostRef.current, (nextVisible) => {
+      window.clearTimeout(visibilityHideTimerRef.current);
+      if (nextVisible) {
+        setVisible(true);
+        return;
+      }
+
+      // Keep decoded media mounted briefly while zooming so the compositor does not
+      // repeatedly destroy and recreate image layers at the viewport boundary.
+      visibilityHideTimerRef.current = window.setTimeout(() => setVisible(false), 720);
+    });
+
+    return () => {
+      window.clearTimeout(visibilityHideTimerRef.current);
+      stopObserving();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!visible || isAssetVideo(asset) || !source) return undefined;
+
+    const currentQuality = previewState.dimension === 0 ? Number.POSITIVE_INFINITY : previewState.dimension;
+    const requestedQuality = previewDimension === 0 ? Number.POSITIVE_INFINITY : previewDimension;
+    if (previewState.source === source && previewState.url && currentQuality >= requestedQuality) return undefined;
+
+    let canceled = false;
+    let unsubscribe = () => {};
+    const installDecodedPreview = async (url, dimension) => {
+      const nextUrl = url || getAssetMediaUrl(asset);
+      if (!nextUrl) return;
+      const image = new window.Image();
+      image.src = nextUrl;
+      try {
+        await image.decode?.();
+      } catch {
+        // The media element still gets a chance to load formats that do not support decode().
+      }
+      if (!canceled) setPreviewState({ source, dimension, url: nextUrl });
+    };
+
+    if (previewDimension === 0) {
+      void installDecodedPreview(getAssetMediaUrl(asset), 0);
+    } else {
+      unsubscribe = requestBoardMediaPreview(source, previewDimension, (url) => {
+        void installDecodedPreview(url, previewDimension);
+      });
+    }
+
+    return () => {
+      canceled = true;
+      unsubscribe();
+    };
+  }, [asset, previewDimension, previewState.dimension, previewState.source, previewState.url, source, visible]);
+
+  const resolvedPreviewUrl = previewState.source === source ? previewState.url : "";
+  const waitsForPreview = Boolean(visible && !isAssetVideo(asset) && source && !resolvedPreviewUrl);
+
+  return (
+    <span ref={hostRef} className="board-media-host">
+      {visible ? (
+        <InlineVideoMedia
+          asset={asset}
+          alt={alt}
+          mediaUrl={resolvedPreviewUrl}
+          waitForMediaUrl={waitsForPreview}
+          onImageLoad={onImageLoad}
+          onVideoMetadata={onVideoMetadata}
+          onMediaError={onMediaError}
+        />
+      ) : null}
+    </span>
   );
 }
 
@@ -1481,9 +1765,25 @@ function normalizeBoardTextNodes(items, fontOptions = noteFontOptions) {
   return changed ? nextItems : items;
 }
 
-function writeBoardClipboard(event, items) {
-  if (!event?.clipboardData || items.length === 0) return false;
+function writeBoardClipboard(event, items, assetById) {
+  if (!event || items.length === 0) return false;
   const serialized = JSON.stringify({ version: 1, items });
+  const imageItem = items.find((item) => {
+    const asset = item?.assetId ? assetById?.get(item.assetId) : null;
+    return asset && !isAssetVideo(asset) && isCheckableLocalPath(getAssetCheckPath(asset));
+  });
+  const imagePath = imageItem ? getAssetCheckPath(assetById.get(imageItem.assetId)) : "";
+
+  if (window.referenceBoard?.writeBoardClipboard) {
+    const written = window.referenceBoard.writeBoardClipboard({ serialized, imagePath });
+    if (written) {
+      event.preventDefault();
+      event.stopPropagation();
+      return true;
+    }
+  }
+
+  if (!event.clipboardData) return false;
   try {
     event.clipboardData.setData(boardClipboardMime, serialized);
   } catch {
@@ -1771,6 +2071,7 @@ function normalizeLibraries(libraries) {
         id,
         name: sanitizeName(library?.name) || (id === defaultLibraryId ? "默认库" : `素材库 ${index + 1}`),
         root: typeof library?.root === "string" ? library.root : "",
+        importMode: library?.importMode === "reference" ? "reference" : "copy",
       };
     })
     .filter(Boolean);
@@ -1874,6 +2175,9 @@ function Workspace({
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [selectedBoardItemId, setSelectedBoardItemId] = useState("");
   const [query, setQuery] = useState("");
+  const [assetSortMode, setAssetSortMode] = useStoredState(libraryStorageKey(storagePrefix, "asset-sort-mode"), "recent");
+  const [assetSortMenuOpen, setAssetSortMenuOpen] = useState(false);
+  const [onboardingComplete, setOnboardingComplete] = useStoredState("reference-board-onboarding-complete", hasExistingWorkspace);
   const [zoom, setZoom] = useState(defaultBoardZoom);
   const [boardViewStates, setBoardViewStates] = useStoredState(libraryStorageKey(storagePrefix, "board-view-states"), {});
   const [viewMode, setViewMode] = useStoredState("reference-board-view-mode", "library");
@@ -1885,6 +2189,9 @@ function Workspace({
   const [assetMenu, setAssetMenu] = useState(null);
   const [libraryMenu, setLibraryMenu] = useState(null);
   const [librarySwitcherMenu, setLibrarySwitcherMenu] = useState(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [onboardingName, setOnboardingName] = useState("我的素材库");
+  const [onboardingImportMode, setOnboardingImportMode] = useState("copy");
   const [renamingAssetId, setRenamingAssetId] = useState("");
   const [renameAssetInput, setRenameAssetInput] = useState("");
   const [multiSelectMode, setMultiSelectMode] = useState(false);
@@ -1915,12 +2222,21 @@ function Workspace({
   const previewStageRef = useRef(null);
   const floatingLaunchTimerRef = useRef(null);
   const draggingAssetIdsRef = useRef([]);
+  const nativeDragStartedRef = useRef(false);
   const cancelAssetRenameRef = useRef(false);
   const boardsRef = useRef(boards);
   const thumbnailRequestSourcesRef = useRef(new Set());
   const thumbnailLibraryRef = useRef(storagePrefix);
 
+  useEffect(() => window.referenceBoard?.onNativeFileDragEnd?.(() => {
+    draggingAssetIdsRef.current = [];
+    nativeDragStartedRef.current = false;
+    setAssetDragActive(false);
+    setFolderDropTarget("");
+  }), []);
+
   const activeBoard = boards.find((board) => board.id === activeBoardId);
+  const activeImportMode = activeLibrary?.importMode === "reference" ? "reference" : "copy";
   const activeItems = activeBoard ? (boardItems[activeBoardId] ?? []) : [];
   const liveAssets = useMemo(() => assets.filter((asset) => !isAssetTrashed(asset)), [assets]);
   const libraryAssets = useMemo(() => liveAssets.filter((asset) => !isBoardFileAsset(asset)), [liveAssets]);
@@ -2050,9 +2366,9 @@ function Workspace({
   }, [colorFilterCounts]);
 
   const filteredAssets = useMemo(() => {
-    if (colorFilter === "all") return baseFilteredAssets;
-    return baseFilteredAssets.filter((asset) => assetMatchesColorFilter(asset, colorFilter));
-  }, [baseFilteredAssets, colorFilter]);
+    const colorMatched = colorFilter === "all" ? baseFilteredAssets : baseFilteredAssets.filter((asset) => assetMatchesColorFilter(asset, colorFilter));
+    return sortAssets(colorMatched, activeCollection === "recent" ? "recent" : assetSortMode);
+  }, [activeCollection, assetSortMode, baseFilteredAssets, colorFilter]);
   const renderedAssets = useMemo(() => filteredAssets.slice(0, assetRenderLimit), [assetRenderLimit, filteredAssets]);
   const previewAssets = filteredAssets.length > 0 ? filteredAssets : assets;
   const previewAssetIndex = previewAsset ? Math.max(0, previewAssets.findIndex((asset) => asset.id === previewAsset.id)) : -1;
@@ -2433,16 +2749,42 @@ function Workspace({
     setLibrarySwitcherMenu(null);
     if (!window.referenceBoard?.chooseLibraryRoot) {
       showToast("素材库路径设置需要在桌面版里使用");
-      return;
+      return null;
     }
 
     const result = await window.referenceBoard.chooseLibraryRoot(activeLibraryId);
-    if (!result || result.canceled) return;
+    if (!result || result.canceled) return result;
     setLibraryRoot(result.libraryRoot || "");
     setLibraries((current) =>
       normalizeLibraries(current).map((library) => (library.id === activeLibraryId ? { ...library, root: result.libraryRoot || "" } : library)),
     );
     showToast(`已更新“${activeLibrary?.name || "当前库"}”的保存位置`);
+    return result;
+  }
+
+  function updateActiveLibraryImportMode(importMode) {
+    const normalizedMode = importMode === "reference" ? "reference" : "copy";
+    setLibraries((current) =>
+      normalizeLibraries(current).map((library) => (library.id === activeLibraryId ? { ...library, importMode: normalizedMode } : library)),
+    );
+    showToast(normalizedMode === "reference" ? "本机文件将使用引用方式导入" : "本机文件将复制副本到素材库");
+  }
+
+  async function chooseOnboardingLibraryRoot() {
+    const result = await chooseLibraryRoot();
+    if (result?.libraryRoot) setLibraryRoot(result.libraryRoot);
+  }
+
+  function finishOnboarding(event) {
+    event.preventDefault();
+    const name = sanitizeName(onboardingName) || "我的素材库";
+    setLibraries((current) =>
+      normalizeLibraries(current).map((library, index) =>
+        index === 0 ? { ...library, name, importMode: onboardingImportMode === "reference" ? "reference" : "copy", root: libraryRoot || library.root } : library,
+      ),
+    );
+    setOnboardingComplete(true);
+    showToast(`已创建素材库“${name}”`);
   }
 
   function updateAsset(assetId, patch) {
@@ -2809,7 +3151,7 @@ function Workspace({
       }
 
       const libraryId = `library-${Date.now()}`;
-      const nextLibrary = { id: libraryId, name, root: "" };
+      const nextLibrary = { id: libraryId, name, root: "", importMode: "copy" };
       setLibraries((current) => [...normalizeLibraries(current), nextLibrary]);
       setActiveLibraryId(libraryId);
       setActiveCollection("all");
@@ -3391,6 +3733,7 @@ function Workspace({
             type: asset.type,
             note: asset.note,
             originalSource: asset.originalSource,
+            referencedSource: Boolean(asset.referencedSource),
             boardFileAsset: isBoardFileAsset(asset),
           })),
         );
@@ -3852,15 +4195,37 @@ function Workspace({
     const draggingIds = multiSelectMode && selectedAssetIds.has(asset.id) ? Array.from(selectedAssetIds) : [asset.id];
     draggingAssetIdsRef.current = draggingIds;
     setAssetDragActive(true);
-    writeAssetDragData(event.dataTransfer, draggingIds);
     setSelectedAssetId(asset.id);
     setSelectedBoardItemId("");
+
+    const sourcePaths = draggingIds
+      .map((assetId) => getAssetCheckPath(assetById.get(assetId)))
+      .map((source) => String(source || "").trim())
+      .filter((source) => source && !/^(https?:|blob:|data:)/i.test(source));
+    if (sourcePaths.length > 0 && window.referenceBoard?.startNativeFileDrag) {
+      event.preventDefault();
+      nativeDragStartedRef.current = true;
+      window.referenceBoard.startNativeFileDrag(sourcePaths);
+      return;
+    }
+
+    writeAssetDragData(event.dataTransfer, draggingIds);
+    const sourcePath = String(asset?.source || "").trim();
+    const fileUrl = getAssetMediaUrl(asset) || asset?.image || "";
+    if (sourcePath && fileUrl.startsWith("file:")) {
+      const extension = extensionFromName(sourcePath);
+      const mimeType = isAssetVideo(asset) ? "video/mp4" : extension === ".png" ? "image/png" : "image/jpeg";
+      const fileName = sourcePath.split(/[\\/]/).pop() || `${asset.title || "MOTZ素材"}${extension || ".png"}`;
+      event.dataTransfer.setData("text/uri-list", fileUrl);
+      event.dataTransfer.setData("DownloadURL", `${mimeType}:${fileName}:${fileUrl}`);
+    }
   }
 
   function endAssetCardDrag() {
     draggingAssetIdsRef.current = [];
     setAssetDragActive(false);
     setFolderDropTarget("");
+    nativeDragStartedRef.current = false;
   }
 
   function handleFolderDragOver(event, folder) {
@@ -3879,8 +4244,9 @@ function Workspace({
 
   function handleFolderDrop(event, folder) {
     const dataIds = readAssetDragIds(event.dataTransfer);
+    const fileIds = assetIdsFromDroppedFiles(event.dataTransfer.files, assets);
     const fallbackIds = draggingAssetIdsRef.current;
-    const droppingIds = dataIds.length > 0 ? dataIds : fallbackIds;
+    const droppingIds = dataIds.length > 0 ? dataIds : fileIds.length > 0 ? fileIds : fallbackIds;
     if (!hasAssetDragData(event.dataTransfer) && droppingIds.length === 0) return;
     event.preventDefault();
     event.stopPropagation();
@@ -4150,7 +4516,7 @@ function Workspace({
   async function openImageImportDialog() {
     const folderName = targetImportFolder();
     if (window.referenceBoard?.importImageFiles) {
-      const result = await window.referenceBoard.importImageFiles(folderName);
+      const result = await window.referenceBoard.importImageFiles(folderName, activeImportMode);
       if (!result || result.canceled) return;
       addImportedAssets(result.assets ?? [], folderName);
       return;
@@ -4190,7 +4556,7 @@ function Workspace({
     });
 
     if (filesWithPaths.length > 0 && window.referenceBoard?.importImagePaths) {
-      const result = await window.referenceBoard.importImagePaths(filesWithPaths, folderName, typeLabel);
+      const result = await window.referenceBoard.importImagePaths(filesWithPaths, folderName, typeLabel, activeImportMode);
       importedAssets.push(
         ...(result.assets ?? []).map((asset) => {
           const assetIsVideo = isAssetVideo(asset);
@@ -4198,8 +4564,8 @@ function Workspace({
             ...asset,
             originalSource: importMeta.originalSource || asset.originalSource,
             remoteSource: importMeta.remoteSource || asset.remoteSource || "",
-            tags: assetIsVideo ? Array.from(new Set([...(asset.tags ?? []), ...tagsForImport, "视频"])) : tagsForImport,
-            note: assetIsVideo ? importMeta.note || asset.note : noteForImport,
+            tags: Array.from(new Set([...(asset.tags ?? []), ...tagsForImport, ...(assetIsVideo ? ["视频"] : [])])),
+            note: importMeta.note || (asset.referencedSource || assetIsVideo ? asset.note : noteForImport),
           };
         }),
       );
@@ -4390,7 +4756,7 @@ function Workspace({
       return;
     }
 
-    const result = await window.referenceBoard.importImageFolder();
+    const result = await window.referenceBoard.importImageFolder(activeImportMode);
     if (!result || result.canceled) return;
 
     const folderName = sanitizeName(result.folderName || "本地文件夹");
@@ -4406,7 +4772,17 @@ function Workspace({
 
   function handleDrop(event) {
     event.preventDefault();
-    handleImport(event.dataTransfer.files, getDropImportMetadata(event.dataTransfer));
+    event.stopPropagation();
+    const droppedFiles = Array.from(event.dataTransfer.files ?? []);
+    if (droppedFiles.length === 0 && (hasAssetDragData(event.dataTransfer) || draggingAssetIdsRef.current.length > 0)) {
+      endAssetCardDrag();
+      return;
+    }
+    const existingPaths = new Set(assets.flatMap(assetPathKeys));
+    const newFiles = droppedFiles.filter((file) => !existingPaths.has(normalizePathKey(localPathFromFile(file))));
+    endAssetCardDrag();
+    if (newFiles.length === 0 && droppedFiles.length > 0) return;
+    handleImport(newFiles.length > 0 ? newFiles : droppedFiles, getDropImportMetadata(event.dataTransfer));
   }
 
   const boardMenuTarget = boardMenu ? boards.find((board) => board.id === boardMenu.boardId) : null;
@@ -4432,6 +4808,7 @@ function Workspace({
         setAssetMenu(null);
         setLibraryMenu(null);
         setLibrarySwitcherMenu(null);
+        setAssetSortMenuOpen(false);
       }}
     >
       <header className="titlebar">
@@ -4466,9 +4843,9 @@ function Workspace({
         <div className="window-actions">
           <button
             className="toolbar-button icon-only"
-            onClick={chooseLibraryRoot}
-            title={libraryRoot ? `素材库保存位置：${libraryRoot}` : "设置素材库保存位置"}
-            aria-label="设置素材库保存位置"
+            onClick={() => setSettingsOpen(true)}
+            title="设置"
+            aria-label="设置"
           >
             <Settings size={15} />
           </button>
@@ -4698,6 +5075,47 @@ function Workspace({
           </div>
           <div className="panel-actions">
             <span className="panel-count">{multiSelectMode ? `已选 ${selectedAssetIds.size}` : `${filteredAssets.length} 个素材`}</span>
+            <div className="asset-sort-control">
+              <button
+                type="button"
+                className={classNames("asset-sort-button", assetSortMenuOpen && "active")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setAssetSortMenuOpen((current) => !current);
+                }}
+                title="素材排序"
+                aria-label="素材排序"
+                aria-expanded={assetSortMenuOpen}
+              >
+                <ArrowDownUp size={13} />
+                <span>{({ recent: "最近添加", oldest: "最早添加", name: "名称", resolution: "分辨率", size: "文件大小" })[assetSortMode]}</span>
+                <ChevronDown size={12} />
+              </button>
+              {assetSortMenuOpen ? (
+                <div className="asset-sort-menu" onClick={(event) => event.stopPropagation()}>
+                  {[
+                    ["recent", "最近添加"],
+                    ["oldest", "最早添加"],
+                    ["name", "名称"],
+                    ["resolution", "分辨率"],
+                    ["size", "文件大小"],
+                  ].map(([value, label]) => (
+                    <button
+                      type="button"
+                      className={assetSortMode === value ? "active" : ""}
+                      key={value}
+                      onClick={() => {
+                        setAssetSortMode(value);
+                        setAssetSortMenuOpen(false);
+                      }}
+                    >
+                      <span>{label}</span>
+                      {assetSortMode === value ? <Check size={13} /> : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
             {activeCollection === "trash" && !multiSelectMode ? (
               <button
                 type="button"
@@ -5499,9 +5917,9 @@ function Workspace({
             <Pencil size={14} />
             修改名字
           </button>
-          <button type="button" onClick={chooseLibraryRoot}>
+          <button type="button" onClick={() => { setLibrarySwitcherMenu(null); setSettingsOpen(true); }}>
             <Settings size={14} />
-            设置保存位置
+            设置
           </button>
           <button type="button" className="danger" disabled={libraries.length <= 1} onClick={() => deleteLibrary(activeLibraryId)}>
             <Trash2 size={14} />
@@ -5570,6 +5988,90 @@ function Workspace({
             <RefreshCw size={14} />
             刷新素材库
           </button>
+        </div>
+      ) : null}
+
+      {!onboardingComplete ? (
+        <div className="dialog-backdrop onboarding-backdrop">
+          <form className="setup-dialog" onSubmit={finishOnboarding}>
+            <div className="setup-dialog-heading">
+              <LibraryBig size={22} />
+              <div>
+                <p>首次使用</p>
+                <h2>创建你的素材库</h2>
+              </div>
+            </div>
+            <label>
+              <span>素材库名称</span>
+              <input value={onboardingName} onChange={(event) => setOnboardingName(event.target.value)} autoFocus placeholder="例如：日常收集" />
+            </label>
+            <div className="settings-field">
+              <span>保存位置</span>
+              <button type="button" className="path-picker" onClick={chooseOnboardingLibraryRoot} title={libraryRoot || "选择保存位置"}>
+                <FolderOpen size={15} />
+                <strong>{libraryRoot || "选择文件夹"}</strong>
+                <span>更改</span>
+              </button>
+            </div>
+            <fieldset className="import-mode-options">
+              <legend>本机文件导入方式</legend>
+              <label className={classNames(onboardingImportMode === "copy" && "active")}>
+                <input type="radio" name="onboarding-import-mode" value="copy" checked={onboardingImportMode === "copy"} onChange={() => setOnboardingImportMode("copy")} />
+                <HardDrive size={17} />
+                <span><strong>复制副本</strong><small>集中管理，原文件移动后仍可使用</small></span>
+              </label>
+              <label className={classNames(onboardingImportMode === "reference" && "active")}>
+                <input type="radio" name="onboarding-import-mode" value="reference" checked={onboardingImportMode === "reference"} onChange={() => setOnboardingImportMode("reference")} />
+                <Link2 size={17} />
+                <span><strong>引用原文件</strong><small>不额外占用空间，原文件不能随意移动</small></span>
+              </label>
+            </fieldset>
+            <div className="dialog-actions">
+              <button type="submit" className="primary">开始使用</button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {settingsOpen ? (
+        <div className="dialog-backdrop" onMouseDown={() => setSettingsOpen(false)}>
+          <section className="settings-dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="dialog-title">
+              <div>
+                <span>当前素材库</span>
+                <strong>{activeLibrary?.name || "素材库"}</strong>
+              </div>
+              <button type="button" onClick={() => setSettingsOpen(false)} aria-label="关闭"><X size={15} /></button>
+            </div>
+            <div className="settings-section">
+              <div className="settings-section-heading">
+                <strong>文件管理</strong>
+                <span>这些设置仅作用于当前素材库</span>
+              </div>
+              <div className="settings-field">
+                <span>保存位置</span>
+                <button type="button" className="path-picker" onClick={chooseLibraryRoot} title={libraryRoot || "选择保存位置"}>
+                  <FolderOpen size={15} />
+                  <strong>{libraryRoot || "尚未设置"}</strong>
+                  <span>更改</span>
+                </button>
+              </div>
+              <fieldset className="import-mode-options compact">
+                <legend>本机文件导入方式</legend>
+                <label className={classNames(activeImportMode === "copy" && "active")}>
+                  <input type="radio" name="settings-import-mode" value="copy" checked={activeImportMode === "copy"} onChange={() => updateActiveLibraryImportMode("copy")} />
+                  <HardDrive size={17} />
+                  <span><strong>复制副本</strong><small>复制到当前库的保存位置</small></span>
+                </label>
+                <label className={classNames(activeImportMode === "reference" && "active")}>
+                  <input type="radio" name="settings-import-mode" value="reference" checked={activeImportMode === "reference"} onChange={() => updateActiveLibraryImportMode("reference")} />
+                  <Link2 size={17} />
+                  <span><strong>引用原文件</strong><small>只保存路径，不复制本机文件</small></span>
+                </label>
+              </fieldset>
+              <p className="settings-note">网页、剪贴板和外部白板中的素材仍会复制进库，以保证内容可以长期使用。</p>
+            </div>
+          </section>
         </div>
       ) : null}
 
@@ -5674,6 +6176,7 @@ function Canvas({
   const selectedCanvasItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
   const groupSelectionBox = selectedCanvasItems.length > 1 ? createResizeSnapshot(selectedCanvasItems)?.box : null;
   const frameRef = useRef(null);
+  const surfaceRef = useRef(null);
   const consumedSelectionRequestRef = useRef(null);
   const clipboardPasteGenerationRef = useRef(0);
   const clipboardPasteAnchorRef = useRef(null);
@@ -5682,6 +6185,16 @@ function Canvas({
   const viewportOffsetRef = useRef(viewportOffset);
   const wheelZoomFrameRef = useRef(0);
   const wheelZoomCommitTimerRef = useRef(0);
+
+  const applyCanvasTransform = useCallback((offset = viewportOffsetRef.current, nextZoom = zoomRef.current) => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    surface.style.transform = viewportTransform(offset, nextZoom);
+    surface.style.setProperty("--selection-control-scale", String(1 / nextZoom));
+    surface.style.setProperty("--selection-outline-width", `${2 / nextZoom}px`);
+    surface.style.setProperty("--selection-stroke-width", `${1 / nextZoom}px`);
+    surface.style.setProperty("--selection-toolbar-gap", `${8 / nextZoom}px`);
+  }, []);
 
   const rememberCanvasView = useCallback((boardId, offset = viewportOffsetRef.current, nextZoom = zoomRef.current) => {
     if (!boardId) return;
@@ -5714,6 +6227,10 @@ function Canvas({
   useEffect(() => {
     viewportOffsetRef.current = viewportOffset;
   }, [viewportOffset]);
+
+  useLayoutEffect(() => {
+    applyCanvasTransform(viewportOffset, zoom);
+  }, [applyCanvasTransform, viewportOffset, zoom]);
 
   useEffect(() => {
     return () => {
@@ -5827,11 +6344,12 @@ function Canvas({
         y: panState.originY + clientY - panState.startY,
       };
       viewportOffsetRef.current = nextOffset;
-      setViewportOffset(nextOffset);
+      applyCanvasTransform(nextOffset, zoomRef.current);
     });
     const move = (event) => scheduledMove.move(event);
     const stop = () => {
       scheduledMove.flush();
+      setViewportOffset({ ...viewportOffsetRef.current });
       rememberCanvasView(activeBoardId);
       setPanState(null);
     };
@@ -5847,7 +6365,7 @@ function Canvas({
       window.removeEventListener("mouseup", stop);
       window.removeEventListener("blur", stop);
     };
-  }, [activeBoardId, panState, rememberCanvasView]);
+  }, [activeBoardId, applyCanvasTransform, panState, rememberCanvasView]);
 
   useEffect(() => {
     if (!resizeState) return undefined;
@@ -5940,6 +6458,7 @@ function Canvas({
       maxBoardZoom,
     );
     if (nextZoom === currentZoom) return;
+    startViewportComposite(frameRef.current);
 
     const anchorX = event.clientX - frameRect.left;
     const anchorY = event.clientY - frameRect.top;
@@ -5954,15 +6473,19 @@ function Canvas({
     if (!wheelZoomFrameRef.current) {
       wheelZoomFrameRef.current = window.requestAnimationFrame(() => {
         wheelZoomFrameRef.current = 0;
-        setCanvasZoom(zoomRef.current);
-        setViewportOffset({ ...viewportOffsetRef.current });
+        applyCanvasTransform(viewportOffsetRef.current, zoomRef.current);
       });
     }
 
     window.clearTimeout(wheelZoomCommitTimerRef.current);
     wheelZoomCommitTimerRef.current = window.setTimeout(() => {
+      setCanvasZoom(zoomRef.current);
+      setViewportOffset({ ...viewportOffsetRef.current });
       setWorkspaceZoom(zoomRef.current);
       rememberCanvasView(activeBoardId);
+      settleViewportComposite(frameRef.current, surfaceRef.current, () => {
+        applyCanvasTransform(viewportOffsetRef.current, zoomRef.current);
+      });
     }, 90);
   }
 
@@ -6030,6 +6553,12 @@ function Canvas({
     event.stopPropagation();
     if (isAssetDrag(event)) {
       addDroppedAssetsToCanvas(readAssetDragIds(event.dataTransfer), event.clientX, event.clientY);
+      return;
+    }
+
+    const existingAssetIds = assetIdsFromDroppedFiles(event.dataTransfer.files, assets);
+    if (existingAssetIds.length > 0) {
+      addDroppedAssetsToCanvas(existingAssetIds, event.clientX, event.clientY);
       return;
     }
 
@@ -6209,6 +6738,7 @@ function Canvas({
       wheelZoomFrameRef.current = 0;
     }
     window.clearTimeout(wheelZoomCommitTimerRef.current);
+    startViewportComposite(frameRef.current);
 
     const frameRect = frameRef.current?.getBoundingClientRect();
     if (!frameRect) {
@@ -6216,6 +6746,7 @@ function Canvas({
       setCanvasZoom(nextZoom);
       setWorkspaceZoom(nextZoom);
       rememberCanvasView(activeBoardId, viewportOffsetRef.current, nextZoom);
+      frameRef.current?.classList.remove("viewport-transforming");
       return;
     }
 
@@ -6235,6 +6766,7 @@ function Canvas({
     setCanvasZoom(nextZoom);
     setWorkspaceZoom(nextZoom);
     rememberCanvasView(activeBoardId, nextOffset, nextZoom);
+    settleViewportComposite(frameRef.current, surfaceRef.current, () => applyCanvasTransform(nextOffset, nextZoom));
   }
 
   function changeCanvasZoom(delta, anchorClientX, anchorClientY, explicitZoom = null) {
@@ -6299,7 +6831,7 @@ function Canvas({
   function handleCanvasCopy(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedBoardItemIds.size === 0) return;
     const copiedItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
-    if (writeBoardClipboard(event, copiedItems)) {
+    if (writeBoardClipboard(event, copiedItems, assetById)) {
       clipboardPasteGenerationRef.current = 0;
     }
   }
@@ -6307,7 +6839,7 @@ function Canvas({
   function handleCanvasCut(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedBoardItemIds.size === 0) return;
     const copiedItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
-    if (!writeBoardClipboard(event, copiedItems)) return;
+    if (!writeBoardClipboard(event, copiedItems, assetById)) return;
     deleteBoardItems(selectedBoardItemIds);
     setSelectedBoardItemIds(new Set());
     setSelectedBoardItemId("");
@@ -6451,9 +6983,10 @@ function Canvas({
       onDrop={handleCanvasDrop}
     >
       <div
+        ref={surfaceRef}
         className="canvas-surface"
         style={{
-          transform: `translate(${viewportOffset.x}px, ${viewportOffset.y}px) scale(${zoom})`,
+          transform: viewportTransform(viewportOffset, zoom),
           "--selection-control-scale": String(1 / zoom),
           "--selection-outline-width": `${2 / zoom}px`,
           "--selection-stroke-width": `${1 / zoom}px`,
@@ -6570,8 +7103,10 @@ function Canvas({
               onPointerUp={stopDrag}
               onContextMenu={(event) => deleteCanvasItem(event, item)}
             >
-              <InlineVideoMedia
+              <BoardMedia
                 asset={asset}
+                item={item}
+                zoom={zoom}
                 alt={asset.title}
                 onImageLoad={(event) => syncCanvasItemAspect(item, event.currentTarget)}
                 onVideoMetadata={(event) => syncCanvasItemAspect(item, event.currentTarget)}
@@ -6777,12 +7312,24 @@ function FloatingBoard({
   const controlsHideTimerRef = useRef(null);
   const suppressNextFloatingMenuRef = useRef(false);
   const floatingShellRef = useRef(null);
+  const floatingSurfaceRef = useRef(null);
   const pendingFloatingTextFocusRef = useRef("");
   const clipboardPasteGenerationRef = useRef(0);
   const clipboardPasteAnchorRef = useRef(null);
   const floatingZoomRef = useRef(zoom);
   const floatingOffsetRef = useRef(viewportOffset);
   const floatingWheelFrameRef = useRef(0);
+  const floatingWheelCommitTimerRef = useRef(0);
+
+  const applyFloatingTransform = useCallback((offset = floatingOffsetRef.current, nextZoom = floatingZoomRef.current) => {
+    const surface = floatingSurfaceRef.current;
+    if (!surface) return;
+    surface.style.transform = viewportTransform(offset, nextZoom);
+    surface.style.setProperty("--selection-control-scale", String(1 / nextZoom));
+    surface.style.setProperty("--selection-outline-width", `${2 / nextZoom}px`);
+    surface.style.setProperty("--selection-stroke-width", `${1 / nextZoom}px`);
+    surface.style.setProperty("--selection-toolbar-gap", `${8 / nextZoom}px`);
+  }, []);
 
   useEffect(() => {
     floatingZoomRef.current = zoom;
@@ -6792,9 +7339,14 @@ function FloatingBoard({
     floatingOffsetRef.current = viewportOffset;
   }, [viewportOffset]);
 
+  useLayoutEffect(() => {
+    applyFloatingTransform(viewportOffset, zoom);
+  }, [applyFloatingTransform, viewportOffset, zoom]);
+
   useEffect(
     () => () => {
       if (floatingWheelFrameRef.current) window.cancelAnimationFrame(floatingWheelFrameRef.current);
+      window.clearTimeout(floatingWheelCommitTimerRef.current);
     },
     [],
   );
@@ -6921,14 +7473,17 @@ function FloatingBoard({
     if (!panState) return undefined;
 
     const scheduledMove = createPointerMoveScheduler((clientX, clientY) => {
-      setViewportOffset({
+      const nextOffset = {
         x: panState.originX + clientX - panState.startX,
         y: panState.originY + clientY - panState.startY,
-      });
+      };
+      floatingOffsetRef.current = nextOffset;
+      applyFloatingTransform(nextOffset, floatingZoomRef.current);
     });
     const move = (event) => scheduledMove.move(event);
     const stop = () => {
       scheduledMove.flush();
+      setViewportOffset({ ...floatingOffsetRef.current });
       setPanState(null);
     };
 
@@ -6943,7 +7498,7 @@ function FloatingBoard({
       window.removeEventListener("mouseup", stop);
       window.removeEventListener("blur", stop);
     };
-  }, [panState]);
+  }, [applyFloatingTransform, panState]);
 
   useEffect(() => {
     const itemIds = new Set(items.map((item) => item.id));
@@ -7139,7 +7694,7 @@ function FloatingBoard({
     });
 
     if (filesWithPaths.length > 0 && window.referenceBoard?.importImagePaths) {
-      const result = await window.referenceBoard.importImagePaths(filesWithPaths, "", typeLabel);
+      const result = await window.referenceBoard.importImagePaths(filesWithPaths, "", typeLabel, activeLibrary?.importMode === "reference" ? "reference" : "copy");
       importedAssets.push(...(result.assets ?? []));
     }
 
@@ -7247,7 +7802,7 @@ function FloatingBoard({
   function handleFloatingCopy(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedFloatingIds.size === 0) return;
     const copiedItems = items.filter((item) => selectedFloatingIds.has(item.id));
-    if (writeBoardClipboard(event, copiedItems)) {
+    if (writeBoardClipboard(event, copiedItems, assetById)) {
       clipboardPasteGenerationRef.current = 0;
     }
   }
@@ -7255,7 +7810,7 @@ function FloatingBoard({
   function handleFloatingCut(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedFloatingIds.size === 0) return;
     const copiedItems = items.filter((item) => selectedFloatingIds.has(item.id));
-    if (!writeBoardClipboard(event, copiedItems)) return;
+    if (!writeBoardClipboard(event, copiedItems, assetById)) return;
     deleteFloatingItems(selectedFloatingIds);
     setEditingNoteId("");
     clipboardPasteGenerationRef.current = 0;
@@ -7289,6 +7844,7 @@ function FloatingBoard({
   }
 
   function setFloatingZoomAnchored(nextZoom, anchorClientX, anchorClientY) {
+    startViewportComposite(floatingShellRef.current);
     const currentZoom = floatingZoomRef.current;
     const currentOffset = floatingOffsetRef.current;
     const boardX = (anchorClientX - currentOffset.x) / currentZoom;
@@ -7301,6 +7857,9 @@ function FloatingBoard({
     floatingOffsetRef.current = nextOffset;
     setViewportOffset(nextOffset);
     setZoom(nextZoom);
+    settleViewportComposite(floatingShellRef.current, floatingSurfaceRef.current, () => {
+      applyFloatingTransform(nextOffset, nextZoom);
+    });
   }
 
   function floatingCenterPoint() {
@@ -7323,6 +7882,7 @@ function FloatingBoard({
     const wheelZoom = currentZoom * Math.exp(-event.deltaY * 0.0015);
     const nextZoom = Math.min(maxBoardZoom, Math.max(minBoardZoom, Number(wheelZoom.toFixed(4))));
     if (nextZoom === currentZoom) return;
+    startViewportComposite(floatingShellRef.current);
 
     const currentOffset = floatingOffsetRef.current;
     const boardX = (event.clientX - currentOffset.x) / currentZoom;
@@ -7336,10 +7896,17 @@ function FloatingBoard({
     if (!floatingWheelFrameRef.current) {
       floatingWheelFrameRef.current = window.requestAnimationFrame(() => {
         floatingWheelFrameRef.current = 0;
-        setViewportOffset({ ...floatingOffsetRef.current });
-        setZoom(floatingZoomRef.current);
+        applyFloatingTransform(floatingOffsetRef.current, floatingZoomRef.current);
       });
     }
+    window.clearTimeout(floatingWheelCommitTimerRef.current);
+    floatingWheelCommitTimerRef.current = window.setTimeout(() => {
+      setViewportOffset({ ...floatingOffsetRef.current });
+      setZoom(floatingZoomRef.current);
+      settleViewportComposite(floatingShellRef.current, floatingSurfaceRef.current, () => {
+        applyFloatingTransform(floatingOffsetRef.current, floatingZoomRef.current);
+      });
+    }, 90);
   }
 
   function handleFloatingPaste(event) {
@@ -7653,6 +8220,12 @@ function FloatingBoard({
       return;
     }
 
+    const existingAssetIds = assetIdsFromDroppedFiles(event.dataTransfer.files, assets);
+    if (existingAssetIds.length > 0) {
+      addDroppedAssetsToFloating(existingAssetIds, event.clientX, event.clientY);
+      return;
+    }
+
     const metadata = getDropImportMetadata(event.dataTransfer);
     const importedAssets = await importExternalMediaToFloating(event.dataTransfer.files, metadata);
     if (importedAssets.length > 0) {
@@ -7817,9 +8390,10 @@ function FloatingBoard({
 
       <div className="floating-canvas">
         <div
+          ref={floatingSurfaceRef}
           className="floating-surface"
           style={{
-            transform: `translate(${viewportOffset.x}px, ${viewportOffset.y}px) scale(${zoom})`,
+            transform: viewportTransform(viewportOffset, zoom),
             "--selection-control-scale": String(1 / zoom),
             "--selection-outline-width": `${2 / zoom}px`,
             "--selection-stroke-width": `${1 / zoom}px`,
@@ -7926,8 +8500,10 @@ function FloatingBoard({
                 onPointerDown={(event) => startFloatingDrag(event, item)}
                 onContextMenu={(event) => showItemMenu(event, item.id)}
               >
-                <InlineVideoMedia
+                <BoardMedia
                   asset={asset}
+                  item={item}
+                  zoom={zoom}
                   alt={asset.title}
                   onImageLoad={(event) => syncFloatingItemAspect(item, event.currentTarget)}
                   onVideoMetadata={(event) => syncFloatingItemAspect(item, event.currentTarget)}
