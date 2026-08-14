@@ -19,8 +19,8 @@
     "build": "vite build",
     "preview": "vite preview --host 127.0.0.1",
     "electron:dev": "set ELECTRON_DEV_SERVER_URL=http://127.0.0.1:5173&& electron .",
-    "package:win": "npm run build && electron-builder --win nsis --x64",
-    "package:win:portable": "npm run build && electron-builder --win portable --x64 --config.win.artifactName=MOTZ白板-Portable-${version}-${arch}.${ext}",
+    "package:win": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "package:win:portable": "npm run build && electron-builder --win portable --x64 --publish never --config.win.artifactName=MOTZ白板-Portable-${version}-${arch}.${ext}",
     "package:dir": "npm run build && electron-builder --win dir --x64",
     "package:mac": "npm run build && electron-builder --mac"
   },
