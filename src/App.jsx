@@ -924,10 +924,33 @@ function MediaElement({
   onVideoMetadata,
   onMediaError,
 }) {
-  const src = mediaUrl || getAssetMediaUrl(asset);
-  const canLoad = !waitForMediaUrl || Boolean(mediaUrl);
+  const requestedSrc = mediaUrl || getAssetMediaUrl(asset);
+  const needsLocalMediaUrl = isCheckableLocalPath(requestedSrc) && typeof window.referenceBoard?.getMediaUrl === "function";
+  const [resolvedLocalMediaUrl, setResolvedLocalMediaUrl] = useState("");
   const placeholderRef = useRef(null);
+  const src = needsLocalMediaUrl ? resolvedLocalMediaUrl : requestedSrc;
+  const canLoad = (!waitForMediaUrl || Boolean(mediaUrl)) && Boolean(src);
   const [shouldLoad, setShouldLoad] = useState(!defer && canLoad);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!needsLocalMediaUrl) {
+      setResolvedLocalMediaUrl("");
+      return undefined;
+    }
+    setResolvedLocalMediaUrl("");
+    window.referenceBoard
+      .getMediaUrl(requestedSrc)
+      .then((url) => {
+        if (!cancelled) setResolvedLocalMediaUrl(typeof url === "string" ? url : "");
+      })
+      .catch(() => {
+        if (!cancelled) setResolvedLocalMediaUrl("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [needsLocalMediaUrl, requestedSrc]);
 
   useEffect(() => {
     if (!canLoad) return undefined;
@@ -2485,6 +2508,12 @@ function Workspace({
     if (!previewAssetId) return undefined;
 
     const handleKeyDown = (event) => {
+      if (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setPreviewAssetId("");
+        return;
+      }
       if (event.key === "Escape") setPreviewAssetId("");
       if (event.key === "ArrowLeft") movePreviewAsset(-1);
       if (event.key === "ArrowRight") movePreviewAsset(1);
@@ -2614,7 +2643,7 @@ function Workspace({
       if (nameDialog || confirmDialog || previewAssetId || isTextEditingTarget(event.target)) return;
       const targetInAssetPanel = Boolean(event.target?.closest?.(".asset-panel"));
       const focusInAssetPanel = Boolean(document.activeElement?.closest?.(".asset-panel"));
-      if (viewMode === "board" || (!targetInAssetPanel && !focusInAssetPanel)) return;
+      if (!targetInAssetPanel && !focusInAssetPanel) return;
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
         event.preventDefault();
@@ -2627,12 +2656,21 @@ function Workspace({
         event.preventDefault();
         event.stopImmediatePropagation();
         confirmDeleteSelectedAssets();
+        return;
+      }
+
+      if (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey && selectedAsset) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setPreviewAssetId(selectedAsset.id);
+        setSelectedAssetId(selectedAsset.id);
+        setSelectedBoardItemId("");
       }
     };
 
     window.addEventListener("keydown", handleAssetPanelKeyDown);
     return () => window.removeEventListener("keydown", handleAssetPanelKeyDown);
-  }, [confirmDialog, filteredAssets, multiSelectMode, nameDialog, previewAssetId, selectedAssetIds, viewMode]);
+  }, [confirmDialog, filteredAssets, multiSelectMode, nameDialog, previewAssetId, selectedAsset, selectedAssetIds, viewMode]);
 
   useEffect(() => {
     if (!dragState) return undefined;
@@ -7307,6 +7345,7 @@ function FloatingBoard({
   const [editingNoteId, setEditingNoteId] = useState("");
   const [windowDragState, setWindowDragState] = useState(null);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const [floatingPreviewAssetId, setFloatingPreviewAssetId] = useState("");
   const availableNoteFonts = useNoteFontOptions();
   const windowDragTimerRef = useRef(null);
   const controlsHideTimerRef = useRef(null);
@@ -7360,6 +7399,7 @@ function FloatingBoard({
   const floatingContextItem = contextMenu?.itemId ? items.find((item) => item.id === contextMenu.itemId) : null;
   const floatingContextIsNote = floatingContextItem?.type === "note";
   const selectedFloatingItems = items.filter((item) => selectedFloatingIds.has(item.id));
+  const floatingPreviewAsset = assetById.get(floatingPreviewAssetId);
   const floatingGroupSelectionBox = selectedFloatingItems.length > 1 ? createResizeSnapshot(selectedFloatingItems)?.box : null;
 
   useLayoutEffect(() => {
@@ -7507,6 +7547,26 @@ function FloatingBoard({
       return next.size === current.size ? current : next;
     });
   }, [items]);
+
+  useEffect(() => {
+    const handleFloatingPreviewKeyDown = (event) => {
+      if (event.code !== "Space" || event.ctrlKey || event.metaKey || event.altKey || isTextEditingTarget(event.target)) return;
+      if (floatingPreviewAssetId) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setFloatingPreviewAssetId("");
+        return;
+      }
+      const targetAsset = selectedFloatingItems.map((item) => assetById.get(item.assetId)).find(Boolean);
+      if (!targetAsset) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setFloatingPreviewAssetId(targetAsset.id);
+    };
+
+    window.addEventListener("keydown", handleFloatingPreviewKeyDown);
+    return () => window.removeEventListener("keydown", handleFloatingPreviewKeyDown);
+  }, [assetById, floatingPreviewAssetId, selectedFloatingItems]);
 
   useEffect(() => {
     if (selectedFloatingIds.size === 0) return undefined;
@@ -8580,6 +8640,40 @@ function FloatingBoard({
           className="floating-selection-box"
           style={{ left: selectionBox.left, top: selectionBox.top, width: selectionBox.width, height: selectionBox.height }}
         />
+      ) : null}
+      {floatingPreviewAsset ? (
+        <div className="image-preview-backdrop" role="dialog" aria-modal="true" onMouseDown={() => setFloatingPreviewAssetId("")}>
+          <section className="image-preview-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="image-preview-topbar">
+              <div>
+                <strong>{floatingPreviewAsset.title}</strong>
+                <span>{floatingPreviewAsset.dimensions || floatingPreviewAsset.size} · 空格关闭</span>
+              </div>
+              <button type="button" onClick={() => setFloatingPreviewAssetId("")} aria-label="关闭预览" title="关闭预览">
+                <X size={17} />
+              </button>
+            </div>
+            <div className={classNames("image-preview-stage", isAssetVideo(floatingPreviewAsset) && "is-video")}>
+              <div
+                className="image-preview-viewport"
+                style={
+                  isAssetVideo(floatingPreviewAsset)
+                    ? undefined
+                    : { width: "calc(100% - 48px)", height: "calc(100% - 32px)", transform: "translate3d(-50%, -50%, 0)" }
+                }
+              >
+                {isAssetVideo(floatingPreviewAsset) ? (
+                  <div className="image-preview-video-frame">
+                    <InlineVideoMedia asset={floatingPreviewAsset} alt={floatingPreviewAsset.title} preload="auto" />
+                  </div>
+                ) : (
+                  <MediaElement asset={floatingPreviewAsset} alt={floatingPreviewAsset.title} />
+                )}
+              </div>
+            </div>
+            <div className="image-preview-strip" />
+          </section>
+        </div>
       ) : null}
       {contextMenu ? (
         <div

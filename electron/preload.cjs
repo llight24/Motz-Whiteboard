@@ -35,6 +35,7 @@ contextBridge.exposeInMainWorld("referenceBoard", {
     return () => boardFileListeners.delete(callback);
   },
   getFilePath: (file) => webUtils?.getPathForFile?.(file) || file?.path || "",
+  getMediaUrl: (filePath) => ipcRenderer.invoke("get-media-url", filePath),
   importImageFiles: (folderName, importMode) => ipcRenderer.invoke("import-image-files", folderName, importMode),
   importImagePaths: (filePaths, folderName, typeLabel, importMode) => ipcRenderer.invoke("import-image-paths", filePaths, folderName, typeLabel, importMode),
   importImageData: (items, folderName) => ipcRenderer.invoke("import-image-data", items, folderName),

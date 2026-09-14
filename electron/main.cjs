@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, shell, screen, dialog, nativeImage, clipboard } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell, screen, dialog, nativeImage, clipboard, protocol } = require("electron");
 const { execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
@@ -30,6 +30,16 @@ let installedFontFamiliesCache = null;
 
 app.setName("MOTZ白板");
 app.setPath("userData", process.env.MOTZ_USER_DATA_DIR || path.join(app.getPath("appData"), "MOTZ白板"));
+
+// The renderer is served over HTTP while developing, so Chromium refuses direct
+// file:// subresources. A dedicated protocol keeps referenced files usable in
+// both development and packaged builds without disabling web security.
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "motz-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 function installedFontFamilies() {
   if (installedFontFamiliesCache) return installedFontFamiliesCache;
@@ -175,6 +185,25 @@ function normalizeFileCheckPath(value) {
     }
   }
   return text;
+}
+
+function mediaUrlForPath(filePath) {
+  const normalizedPath = normalizeFileCheckPath(filePath);
+  if (!normalizedPath) return "";
+  return `motz-media://local/${Buffer.from(path.resolve(normalizedPath), "utf8").toString("base64url")}`;
+}
+
+function mediaPathFromUrl(requestUrl) {
+  try {
+    const url = new URL(requestUrl);
+    if (url.protocol !== "motz-media:" || url.hostname !== "local") return "";
+    const token = url.pathname.replace(/^\/+/, "");
+    const filePath = Buffer.from(token, "base64url").toString("utf8");
+    const resolvedPath = path.resolve(filePath);
+    return mediaExtensions.has(path.extname(resolvedPath).toLowerCase()) && fs.existsSync(resolvedPath) ? resolvedPath : "";
+  } catch {
+    return "";
+  }
 }
 
 function sanitizePathPart(value) {
@@ -1587,6 +1616,10 @@ app.whenReady().then(() => {
     }
     return;
   }
+  protocol.registerFileProtocol("motz-media", (request, callback) => {
+    const filePath = mediaPathFromUrl(request.url);
+    callback(filePath ? { path: filePath } : { error: -6 });
+  });
   Menu.setApplicationMenu(null);
   startPluginBridgeServer();
   ipcMain.on("renderer-ready", (event) => {
@@ -1660,6 +1693,7 @@ app.whenReady().then(() => {
     fs.mkdirSync(libraryRoot, { recursive: true });
     return libraryRoot;
   });
+  ipcMain.handle("get-media-url", (_event, filePath) => mediaUrlForPath(filePath));
   ipcMain.handle("activate-library", (_event, library = {}) => {
     return activateLibraryRoot(library);
   });
