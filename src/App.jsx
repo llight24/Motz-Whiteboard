@@ -3,6 +3,7 @@ import {
   Archive,
   ArrowDownUp,
   BadgeInfo,
+  Boxes,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -2602,6 +2603,7 @@ function Workspace({
   const [libraryMenu, setLibraryMenu] = useState(null);
   const [librarySwitcherMenu, setLibrarySwitcherMenu] = useState(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [eagleImport, setEagleImport] = useState(null);
   const [onboardingName, setOnboardingName] = useState("我的素材库");
   const [onboardingImportMode, setOnboardingImportMode] = useState("copy");
   const [renamingAssetId, setRenamingAssetId] = useState("");
@@ -2646,6 +2648,14 @@ function Workspace({
     setAssetDragActive(false);
     setFolderDropTarget("");
   }), []);
+
+  useEffect(() => {
+    const unsubscribe = window.referenceBoard?.onEagleImportProgress?.((payload) => {
+      if (!payload) return;
+      setEagleImport((current) => (current ? { ...current, ...payload } : current));
+    });
+    return () => unsubscribe?.();
+  }, []);
 
   const activeBoard = boards.find((board) => board.id === activeBoardId);
   const activeImportMode = activeLibrary?.importMode === "reference" ? "reference" : "copy";
@@ -5209,6 +5219,64 @@ function Workspace({
     addImportedAssets(importedAssets, folderName, `已从「${folderName}」导入`);
   }
 
+  // 整个 Eagle 素材库按原分类层级导入：复制副本模式把文件搬进当前库，引用模式只记录路径。
+  async function importEagleLibrary() {
+    setLibrarySwitcherMenu(null);
+    if (!window.referenceBoard?.importEagleLibrary) {
+      showToast("添加 Eagle 素材库需要在桌面版里使用");
+      return;
+    }
+
+    setEagleImport({ phase: "scan", done: 0, total: 0, current: "" });
+    let result = null;
+    try {
+      result = await window.referenceBoard.importEagleLibrary(
+        activeImportMode,
+        assets.flatMap((asset) => (asset.eagleId ? [asset.eagleId] : [])),
+      );
+    } finally {
+      setEagleImport(null);
+    }
+
+    if (!result || result.canceled) return;
+    if (!result.ok) {
+      showToast(result.reason || "没有读取到这个 Eagle 素材库");
+      return;
+    }
+
+    const importedAssets = Array.isArray(result.assets) ? result.assets : [];
+    const folderPaths = (Array.isArray(result.folders) ? result.folders : []).map(normalizeFolderPath).filter(Boolean);
+
+    if (folderPaths.length > 0) {
+      setFolders((current) => {
+        const merged = new Set([...current.map(normalizeFolderPath), ...folderPaths]);
+        return sortFoldersByHierarchy(Array.from(merged));
+      });
+    }
+
+    if (importedAssets.length === 0) {
+      const stats = result.stats ?? {};
+      showToast(stats.existing > 0 ? `「${result.libraryName}」的素材已经在库里了` : `「${result.libraryName}」里没有检索到可导入的图片或视频`);
+      return;
+    }
+
+    setAssets((current) => [...importedAssets, ...current]);
+    setActiveCollection("all");
+    setActiveFolder("");
+    setSelectedAssetId(importedAssets[0].id);
+    setSelectedBoardItemId("");
+    setMultiSelectMode(false);
+    setSelectedAssetIds(new Set());
+
+    const stats = result.stats ?? {};
+    const parts = [`已从「${result.libraryName}」导入 ${importedAssets.length} 个素材`, `${folderPaths.length} 个分类`];
+    if (stats.existing > 0) parts.push(`跳过 ${stats.existing} 个已导入`);
+    if (stats.unsupported > 0) parts.push(`忽略 ${stats.unsupported} 个非图片/视频文件`);
+    if (stats.unreadable > 0) parts.push(`${stats.unreadable} 个缺少文件`);
+    if (stats.failed > 0) parts.push(`${stats.failed} 个失败`);
+    showToast(parts.join("，"));
+  }
+
   function handleDrop(event) {
     event.preventDefault();
     event.stopPropagation();
@@ -6186,6 +6254,22 @@ function Workspace({
         </div>
       ) : null}
 
+      {eagleImport ? (
+        <div className="dialog-backdrop eagle-import-backdrop">
+          <div className="eagle-import-card" role="status" aria-live="polite">
+            <span className="eagle-import-spinner" aria-hidden="true" />
+            <div>
+              <strong>{eagleImport.phase === "scan" ? "正在识别 Eagle 素材库结构" : "正在导入 Eagle 素材库"}</strong>
+              <p>
+                {eagleImport.total > 0 ? `${eagleImport.done} / ${eagleImport.total}` : "读取分类与素材清单"}
+                {eagleImport.current ? ` · ${eagleImport.current}` : ""}
+              </p>
+              <small>{activeImportMode === "reference" ? "引用原文件：不复制 Eagle 里的素材" : "复制副本：素材会复制到当前素材库"}</small>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {boardManagerOpen ? (
         <div className="dialog-backdrop board-manager-backdrop" onMouseDown={() => setBoardManagerOpen(false)}>
           <section className="board-manager" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
@@ -6352,6 +6436,10 @@ function Workspace({
           <button type="button" onClick={createLibrary}>
             <Plus size={14} />
             新建库
+          </button>
+          <button type="button" onClick={importEagleLibrary}>
+            <Boxes size={14} />
+            添加 Eagle 素材库
           </button>
           <button type="button" onClick={renameActiveLibrary}>
             <Pencil size={14} />

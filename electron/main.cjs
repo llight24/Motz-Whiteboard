@@ -703,6 +703,229 @@ function importPathsToLibrary(filePaths, folderName = "未分类", type = "导�
     .filter(Boolean);
 }
 
+// Eagle 素材库（*.library）的结构：metadata.json 里的 folders 是带 children 的嵌套树，
+// images/<itemId>.info/ 下放原始文件和同名 metadata.json，随附 <名称>_thumbnail.png 缩略图。
+const eagleThumbnailPattern = /_thumbnail\.(png|jpe?g|webp|gif)$/i;
+
+function readJsonFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath);
+    const text = raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf ? raw.subarray(3).toString("utf8") : raw.toString("utf8");
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function isEagleLibraryRoot(dirPath) {
+  if (!dirPath) return false;
+  try {
+    return fs.statSync(path.join(dirPath, "metadata.json")).isFile() && fs.statSync(path.join(dirPath, "images")).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// 用户可以选中 .library 本身，也可以选中存放素材库的上级目录。
+function resolveEagleLibraryRoot(selectedPath) {
+  if (isEagleLibraryRoot(selectedPath)) return { libraryPath: selectedPath, reason: "" };
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(selectedPath, { withFileTypes: true });
+  } catch {
+    return { libraryPath: "", reason: "无法读取这个文件夹" };
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().endsWith(".library"))
+    .map((entry) => path.join(selectedPath, entry.name))
+    .filter(isEagleLibraryRoot);
+
+  if (candidates.length === 1) return { libraryPath: candidates[0], reason: "" };
+  if (candidates.length > 1) return { libraryPath: "", reason: "这里存放了多个 Eagle 素材库，请直接选中要导入的 .library 文件夹" };
+  return { libraryPath: "", reason: "没有找到 Eagle 素材库，请选择包含 metadata.json 的 .library 文件夹" };
+}
+
+// 分类名直接进入 MOTZ 的 “父 / 子” 路径，因此把斜杠换成全角斜杠，避免层级被拆错。
+function sanitizeEagleFolderName(value) {
+  return String(value ?? "")
+    .replace(/[\\/]/g, "／")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildEagleFolderIndex(folders) {
+  const pathsById = new Map();
+  const folderPaths = [];
+
+  const walk = (nodes, parentPath) => {
+    (Array.isArray(nodes) ? nodes : []).forEach((node) => {
+      const name = sanitizeEagleFolderName(node?.name) || "未命名分类";
+      const folderPath = parentPath ? `${parentPath} / ${name}` : name;
+      const id = String(node?.id || "").trim();
+      if (id && !pathsById.has(id)) pathsById.set(id, folderPath);
+      if (!folderPaths.includes(folderPath)) folderPaths.push(folderPath);
+      walk(node?.children, folderPath);
+    });
+  };
+
+  walk(folders, "");
+  return { pathsById, folderPaths };
+}
+
+function eagleItemMediaPath(infoDir, itemMetadata) {
+  const itemName = String(itemMetadata?.name || "").trim();
+  const ext = `.${String(itemMetadata?.ext || "").replace(/^\./, "").toLowerCase()}`;
+
+  if (itemName && ext.length > 1) {
+    const exactPath = path.join(infoDir, `${itemName}${ext}`);
+    try {
+      if (fs.statSync(exactPath).isFile()) return exactPath;
+    } catch {
+      // 名称被改过时回落到目录扫描。
+    }
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(infoDir, { withFileTypes: true });
+  } catch {
+    return "";
+  }
+
+  const candidates = entries
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("._") && mediaExtensions.has(path.extname(entry.name).toLowerCase()))
+    .map((entry) => entry.name);
+  if (candidates.length === 0) return "";
+
+  const originals = candidates.filter((name) => !eagleThumbnailPattern.test(name) && name.toLowerCase() !== "thumbnail.png");
+  if (originals.length === 0) return "";
+  const matchingExt = originals.filter((name) => path.extname(name).toLowerCase() === ext);
+  return path.join(infoDir, matchingExt[0] ?? originals[0]);
+}
+
+// 素材目录里除缩略图外还有原始文件，说明只是格式不支持，而不是文件缺失。
+function eagleHasOriginalFile(infoDir) {
+  try {
+    return fs
+      .readdirSync(infoDir, { withFileTypes: true })
+      .some(
+        (entry) =>
+          entry.isFile() &&
+          entry.name !== "metadata.json" &&
+          !entry.name.startsWith("._") &&
+          !eagleThumbnailPattern.test(entry.name) &&
+          entry.name.toLowerCase() !== "thumbnail.png",
+      );
+  } catch {
+    return false;
+  }
+}
+
+function scanEagleLibrary(libraryPath) {
+  const libraryMetadata = readJsonFile(path.join(libraryPath, "metadata.json"));
+  const folderIndex = buildEagleFolderIndex(libraryMetadata?.folders);
+  const items = [];
+  const skipped = { deleted: 0, unsupported: 0, unreadable: 0 };
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(path.join(libraryPath, "images"), { withFileTypes: true });
+  } catch {
+    entries = [];
+  }
+
+  entries.forEach((entry) => {
+    if (!entry.isDirectory() || !entry.name.toLowerCase().endsWith(".info")) return;
+
+    const infoDir = path.join(libraryPath, "images", entry.name);
+    const itemMetadata = readJsonFile(path.join(infoDir, "metadata.json")) || {};
+    if (itemMetadata.isDeleted === true) {
+      skipped.deleted += 1;
+      return;
+    }
+
+    const mediaPath = eagleItemMediaPath(infoDir, itemMetadata);
+    if (!mediaPath) {
+      // metadata.json 损坏时靠目录内容判断：有原始文件就是格式不支持，否则是文件缺失。
+      if (eagleHasOriginalFile(infoDir)) skipped.unsupported += 1;
+      else skipped.unreadable += 1;
+      return;
+    }
+    if (!isImagePath(mediaPath) && !isVideoPath(mediaPath)) {
+      skipped.unsupported += 1;
+      return;
+    }
+
+    const folderIds = Array.isArray(itemMetadata.folders) ? itemMetadata.folders.map((id) => String(id)) : [];
+    items.push({
+      id: String(itemMetadata.id || path.basename(entry.name, ".info")),
+      name: String(itemMetadata.name || "").trim() || path.basename(mediaPath, path.extname(mediaPath)),
+      mediaPath,
+      mediaKind: mediaKindForPath(mediaPath),
+      // Eagle 允许一个素材属于多个分类，这里按 Eagle 记录的顺序落在第一个分类。
+      folder: folderIds.map((id) => folderIndex.pathsById.get(id)).find(Boolean) || "",
+      tags: (Array.isArray(itemMetadata.tags) ? itemMetadata.tags : [])
+        .map((tag) => String(tag).replace(/\s+/g, " ").trim())
+        .filter(Boolean),
+      annotation: String(itemMetadata.annotation || "").trim(),
+      url: String(itemMetadata.url || "").trim(),
+      modifiedAt: Number(itemMetadata.modificationTime || itemMetadata.lastModified || 0) || 0,
+    });
+  });
+
+  items.sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name, "zh-Hans-CN"));
+  return { folderIndex, items, skipped };
+}
+
+function eagleAssetNote(libraryName, importMode, annotation) {
+  const base =
+    importMode === "reference"
+      ? `从 Eagle 素材库「${libraryName}」引用原始文件。`
+      : `从 Eagle 素材库「${libraryName}」复制副本到软件素材库。`;
+  return annotation ? `${base}备注：${annotation}` : base;
+}
+
+function importEagleLibraryItems(items, { libraryName, importMode, existingEagleIds, onProgress }) {
+  const shouldReference = importMode === "reference";
+  const existing = new Set(Array.isArray(existingEagleIds) ? existingEagleIds.map((id) => String(id)) : []);
+  const assets = [];
+  const failed = [];
+  let skippedExisting = 0;
+
+  items.forEach((item, index) => {
+    if (existing.has(item.id)) {
+      skippedExisting += 1;
+      onProgress?.(index + 1, items.length, item.name);
+      return;
+    }
+
+    try {
+      const imported = shouldReference
+        ? referenceMediaFromPath(item.mediaPath, item.folder, index, "Eagle 引用")
+        : item.mediaKind === "video"
+          ? copyVideoToLibrary(item.mediaPath, item.folder, index, "Eagle 素材")
+          : copyImageToLibrary(item.mediaPath, item.folder, index, "Eagle 素材");
+
+      assets.push({
+        ...imported,
+        title: item.name,
+        tags: Array.from(new Set(["Eagle", ...item.tags, ...(item.mediaKind === "video" ? ["视频"] : [])])),
+        note: eagleAssetNote(libraryName, importMode, item.annotation),
+        eagleId: item.id,
+        ...(item.url ? { remoteSource: item.url } : {}),
+      });
+    } catch (error) {
+      failed.push({ id: item.id, name: item.name, reason: String(error?.message || error) });
+    }
+
+    onProgress?.(index + 1, items.length, item.name);
+  });
+
+  return { assets, failed, skippedExisting };
+}
+
 function extensionFromContentType(contentType = "") {
   const normalized = contentType.split(";")[0].trim().toLowerCase();
   const map = {
@@ -2038,6 +2261,63 @@ app.whenReady().then(() => {
       })
       .filter(Boolean);
     return { libraryRoot, assets };
+  });
+  ipcMain.handle("import-eagle-library", async (event, importMode = "copy", existingEagleIds = []) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const result = await dialog.showOpenDialog(owner, {
+      title: "选择 Eagle 素材库文件夹（.library）",
+      buttonLabel: "导入这个素材库",
+      properties: ["openDirectory"],
+    });
+
+    if (result.canceled || !result.filePaths[0]) return { canceled: true, assets: [] };
+
+    const resolved = resolveEagleLibraryRoot(result.filePaths[0]);
+    if (!resolved.libraryPath) return { canceled: false, ok: false, reason: resolved.reason };
+
+    const libraryPath = resolved.libraryPath;
+    const libraryName = path.basename(libraryPath).replace(/\.library$/i, "") || "Eagle";
+    const mode = importMode === "reference" ? "reference" : "copy";
+    let lastProgressAt = 0;
+    const sendProgress = (phase, done, total, current = "") => {
+      if (event.sender.isDestroyed()) return;
+      const now = Date.now();
+      if (phase === "copy" && done < total && now - lastProgressAt < 80) return;
+      lastProgressAt = now;
+      event.sender.send("eagle-import-progress", { phase, done, total, current });
+    };
+
+    try {
+      sendProgress("scan", 0, 0);
+      const { folderIndex, items, skipped } = scanEagleLibrary(libraryPath);
+      const imported = importEagleLibraryItems(items, {
+        libraryName,
+        importMode: mode,
+        existingEagleIds,
+        onProgress: (done, total, current) => sendProgress("copy", done, total, current),
+      });
+
+      return {
+        canceled: false,
+        ok: true,
+        libraryPath,
+        libraryName,
+        folders: folderIndex.folderPaths,
+        assets: imported.assets,
+        stats: {
+          total: items.length,
+          imported: imported.assets.length,
+          failed: imported.failed.length,
+          existing: imported.skippedExisting,
+          folders: folderIndex.folderPaths.length,
+          ...skipped,
+        },
+      };
+    } catch (error) {
+      return { canceled: false, ok: false, reason: `读取 Eagle 素材库失败：${error?.message || error}` };
+    } finally {
+      sendProgress("done", 0, 0);
+    }
   });
   ipcMain.handle("import-image-folder", async (event, importMode = "copy") => {
     const owner = BrowserWindow.fromWebContents(event.sender);

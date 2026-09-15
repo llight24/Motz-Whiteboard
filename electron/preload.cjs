@@ -41,6 +41,13 @@ contextBridge.exposeInMainWorld("referenceBoard", {
   importImageData: (items, folderName) => ipcRenderer.invoke("import-image-data", items, folderName),
   importImageUrls: (urls, folderName, originalSource) => ipcRenderer.invoke("import-image-urls", urls, folderName, originalSource),
   importImageFolder: (importMode) => ipcRenderer.invoke("import-image-folder", importMode),
+  importEagleLibrary: (importMode, existingEagleIds) => ipcRenderer.invoke("import-eagle-library", importMode, existingEagleIds),
+  onEagleImportProgress: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("eagle-import-progress", listener);
+    return () => ipcRenderer.removeListener("eagle-import-progress", listener);
+  },
   startNativeFileDrag: (filePaths) => ipcRenderer.send("start-native-file-drag", filePaths),
   onNativeFileDragEnd: (callback) => {
     if (typeof callback !== "function") return () => {};
