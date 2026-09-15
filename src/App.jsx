@@ -49,6 +49,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import pauseIconSvg from "../暂停.svg?raw";
 import playIconSvg from "../播放.svg?raw";
 
@@ -6582,7 +6583,7 @@ function Canvas({
         if (event.code !== "Space" && event.key !== "Escape") return;
         event.preventDefault();
         event.stopImmediatePropagation();
-        setCanvasPreviewAssetId("");
+        closeCanvasPreview();
         return;
       }
       if (event.code !== "Space") return;
@@ -6967,6 +6968,11 @@ function Canvas({
       x: (clientX - frameRect.left - currentOffset.x) / currentZoom,
       y: (clientY - frameRect.top - currentOffset.y) / currentZoom,
     };
+  }
+
+  function closeCanvasPreview() {
+    setCanvasPreviewAssetId("");
+    frameRef.current?.focus?.({ preventScroll: true });
   }
 
   function setCanvasZoomAnchored(nextZoom, anchorClientX, anchorClientY) {
@@ -7516,40 +7522,51 @@ function Canvas({
           )}
         </div>
       ) : null}
-      {canvasPreviewAsset ? (
-        <div className="image-preview-backdrop" role="dialog" aria-modal="true" onMouseDown={() => setCanvasPreviewAssetId("")}>
-          <section className="image-preview-modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="image-preview-topbar">
-              <div>
-                <strong>{canvasPreviewAsset.title}</strong>
-                <span>{canvasPreviewAsset.dimensions || canvasPreviewAsset.size} · 空格关闭</span>
-              </div>
-              <button type="button" onClick={() => setCanvasPreviewAssetId("")} aria-label="关闭预览" title="关闭预览">
-                <X size={17} />
-              </button>
-            </div>
-            <div className={classNames("image-preview-stage", isAssetVideo(canvasPreviewAsset) && "is-video")}>
-              <div
-                className="image-preview-viewport"
-                style={
-                  isAssetVideo(canvasPreviewAsset)
-                    ? undefined
-                    : { width: "calc(100% - 48px)", height: "calc(100% - 32px)", transform: "translate3d(-50%, -50%, 0)" }
-                }
-              >
-                {isAssetVideo(canvasPreviewAsset) ? (
-                  <div className="image-preview-video-frame">
-                    <InlineVideoMedia asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} preload="auto" />
+      {canvasPreviewAsset
+        ? createPortal(
+            // 画布内是 isolated 堆叠上下文，预览需要挂到 body 才能盖住素材库与详情栏；
+            // 门户仍沿 React 树冒泡到画布，因此预览内部拦掉指针事件，避免关掉预览时清空选区。
+            <div
+              className="image-preview-backdrop"
+              role="dialog"
+              aria-modal="true"
+              onPointerDown={(event) => event.stopPropagation()}
+              onMouseDown={closeCanvasPreview}
+            >
+              <section className="image-preview-modal" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
+                <div className="image-preview-topbar">
+                  <div>
+                    <strong>{canvasPreviewAsset.title}</strong>
+                    <span>{canvasPreviewAsset.dimensions || canvasPreviewAsset.size} · 空格关闭</span>
                   </div>
-                ) : (
-                  <MediaElement asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} />
-                )}
-              </div>
-            </div>
-            <div className="image-preview-strip" />
-          </section>
-        </div>
-      ) : null}
+                  <button type="button" onClick={closeCanvasPreview} aria-label="关闭预览" title="关闭预览">
+                    <X size={17} />
+                  </button>
+                </div>
+                <div className={classNames("image-preview-stage", isAssetVideo(canvasPreviewAsset) && "is-video")}>
+                  <div
+                    className="image-preview-viewport"
+                    style={
+                      isAssetVideo(canvasPreviewAsset)
+                        ? undefined
+                        : { width: "calc(100% - 48px)", height: "calc(100% - 32px)", transform: "translate3d(-50%, -50%, 0)" }
+                    }
+                  >
+                    {isAssetVideo(canvasPreviewAsset) ? (
+                      <div className="image-preview-video-frame">
+                        <InlineVideoMedia asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} preload="auto" />
+                      </div>
+                    ) : (
+                      <MediaElement asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} />
+                    )}
+                  </div>
+                </div>
+                <div className="image-preview-strip" />
+              </section>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
@@ -8958,8 +8975,14 @@ function FloatingBoard({
         />
       ) : null}
       {floatingPreviewAsset ? (
-        <div className="image-preview-backdrop" role="dialog" aria-modal="true" onMouseDown={() => setFloatingPreviewAssetId("")}>
-          <section className="image-preview-modal" onMouseDown={(event) => event.stopPropagation()}>
+        <div
+          className="image-preview-backdrop"
+          role="dialog"
+          aria-modal="true"
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={() => setFloatingPreviewAssetId("")}
+        >
+          <section className="image-preview-modal" onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
             <div className="image-preview-topbar">
               <div>
                 <strong>{floatingPreviewAsset.title}</strong>
