@@ -910,28 +910,12 @@ function videoMimeTypeFromSource(value) {
   return map[extension] || undefined;
 }
 
-function MediaElement({
-  asset,
-  alt = "",
-  className = "",
-  controls = false,
-  defer = false,
-  mediaUrl = "",
-  waitForMediaUrl = false,
-  muted = true,
-  loop = false,
-  preload = "metadata",
-  onImageLoad,
-  onVideoMetadata,
-  onMediaError,
-}) {
-  const requestedSrc = mediaUrl || getAssetMediaUrl(asset);
+// 渲染进程在开发模式下跑在 http 源上、打包后跑在 file 源上，直接引用本地文件会被
+// Chromium 的资源安全检查拦掉（Media load rejected by URL safety check），
+// 因此统一经主进程的 motz-media 协议换成可用地址。
+function useResolvedMediaUrl(requestedSrc) {
   const needsLocalMediaUrl = isCheckableLocalPath(requestedSrc) && typeof window.referenceBoard?.getMediaUrl === "function";
   const [resolvedLocalMediaUrl, setResolvedLocalMediaUrl] = useState("");
-  const placeholderRef = useRef(null);
-  const src = needsLocalMediaUrl ? resolvedLocalMediaUrl : requestedSrc;
-  const canLoad = (!waitForMediaUrl || Boolean(mediaUrl)) && Boolean(src);
-  const [shouldLoad, setShouldLoad] = useState(!defer && canLoad);
 
   useEffect(() => {
     let cancelled = false;
@@ -952,6 +936,30 @@ function MediaElement({
       cancelled = true;
     };
   }, [needsLocalMediaUrl, requestedSrc]);
+
+  return needsLocalMediaUrl ? resolvedLocalMediaUrl : requestedSrc;
+}
+
+function MediaElement({
+  asset,
+  alt = "",
+  className = "",
+  controls = false,
+  defer = false,
+  mediaUrl = "",
+  waitForMediaUrl = false,
+  muted = true,
+  loop = false,
+  preload = "metadata",
+  onImageLoad,
+  onVideoMetadata,
+  onMediaError,
+}) {
+  const requestedSrc = mediaUrl || getAssetMediaUrl(asset);
+  const src = useResolvedMediaUrl(requestedSrc);
+  const placeholderRef = useRef(null);
+  const canLoad = (!waitForMediaUrl || Boolean(mediaUrl)) && Boolean(src);
+  const [shouldLoad, setShouldLoad] = useState(!defer && canLoad);
 
   useEffect(() => {
     if (!canLoad) return undefined;
@@ -1032,7 +1040,7 @@ function revealVideoFirstFrame(video) {
   });
 }
 
-function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = false, preload = "metadata", onImageLoad, onVideoMetadata, onMediaError }) {
+function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = false, preload = "metadata", autoPlay = false, onImageLoad, onVideoMetadata, onMediaError }) {
   const videoRef = useRef(null);
   const hideTimerRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -1040,6 +1048,7 @@ function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = fa
   const [muted, setMuted] = useState(false);
   const [volume, setVolume] = useState(0.85);
   const [progress, setProgress] = useState(0);
+  const src = useResolvedMediaUrl(getAssetMediaUrl(asset));
 
   useEffect(() => {
     return () => window.clearTimeout(hideTimerRef.current);
@@ -1051,6 +1060,15 @@ function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = fa
     video.volume = clampNumber(volume, 0, 1);
     video.muted = muted || volume <= 0;
   }, [muted, volume]);
+
+  // 预览场景自动起播；被浏览器策略拦下时保留控制条，用户仍可手动播放。
+  useEffect(() => {
+    if (!autoPlay) return undefined;
+    const video = videoRef.current;
+    if (!video) return undefined;
+    video.play?.()?.catch?.(() => setControlsVisible(true));
+    return undefined;
+  }, [autoPlay, src]);
 
   if (!isAssetVideo(asset)) {
     return (
@@ -1065,7 +1083,6 @@ function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = fa
     );
   }
 
-  const src = getAssetMediaUrl(asset);
   function clearHideTimer() {
     window.clearTimeout(hideTimerRef.current);
   }
@@ -1183,30 +1200,32 @@ function InlineVideoMedia({ asset, alt = "", mediaUrl = "", waitForMediaUrl = fa
       onMouseMove={handleControlHover}
       onMouseLeave={handleLeave}
     >
-      <video
-        key={src}
-        src={src}
-        ref={videoRef}
-        muted={silent}
-        preload={preload}
-        playsInline
-        draggable="false"
-        onLoadedMetadata={(event) => {
-          updateProgress(event.currentTarget);
-          revealVideoFirstFrame(event.currentTarget);
-          onVideoMetadata?.(event);
-        }}
-        onLoadedData={(event) => {
-          updateProgress(event.currentTarget);
-          revealVideoFirstFrame(event.currentTarget);
-        }}
-        onCanPlay={(event) => updateProgress(event.currentTarget)}
-        onTimeUpdate={(event) => updateProgress(event.currentTarget)}
-        onPlay={handlePlay}
-        onPause={handlePause}
-        onEnded={handlePause}
-        onError={onMediaError}
-      />
+      {src ? (
+        <video
+          key={src}
+          src={src}
+          ref={videoRef}
+          muted={silent}
+          preload={preload}
+          playsInline
+          draggable="false"
+          onLoadedMetadata={(event) => {
+            updateProgress(event.currentTarget);
+            revealVideoFirstFrame(event.currentTarget);
+            onVideoMetadata?.(event);
+          }}
+          onLoadedData={(event) => {
+            updateProgress(event.currentTarget);
+            revealVideoFirstFrame(event.currentTarget);
+          }}
+          onCanPlay={(event) => updateProgress(event.currentTarget)}
+          onTimeUpdate={(event) => updateProgress(event.currentTarget)}
+          onPlay={handlePlay}
+          onPause={handlePause}
+          onEnded={handlePause}
+          onError={onMediaError}
+        />
+      ) : null}
       <button
         type="button"
         className="inline-video-toggle"
@@ -5995,6 +6014,7 @@ function Workspace({
                       asset={previewAsset}
                       alt={previewAsset.title}
                       preload="auto"
+                      autoPlay
                       onVideoMetadata={(event) => syncAssetVideoDimensions(previewAsset, event.currentTarget)}
                     />
                   </div>
@@ -7554,7 +7574,7 @@ function Canvas({
                   >
                     {isAssetVideo(canvasPreviewAsset) ? (
                       <div className="image-preview-video-frame">
-                        <InlineVideoMedia asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} preload="auto" />
+                        <InlineVideoMedia asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} preload="auto" autoPlay />
                       </div>
                     ) : (
                       <MediaElement asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} />
@@ -9003,7 +9023,7 @@ function FloatingBoard({
               >
                 {isAssetVideo(floatingPreviewAsset) ? (
                   <div className="image-preview-video-frame">
-                    <InlineVideoMedia asset={floatingPreviewAsset} alt={floatingPreviewAsset.title} preload="auto" />
+                    <InlineVideoMedia asset={floatingPreviewAsset} alt={floatingPreviewAsset.title} preload="auto" autoPlay />
                   </div>
                 ) : (
                   <MediaElement asset={floatingPreviewAsset} alt={floatingPreviewAsset.title} />
