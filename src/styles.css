@@ -3280,6 +3280,12 @@ select:disabled {
   width: min(560px, calc(100vw - 40px));
 }
 
+/* 设置里加上键位列表后对话框会高过窗口，限制高度并让内容自己滚动，避免底部按钮点不到。 */
+.settings-dialog {
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
 .onboarding-backdrop {
   z-index: 100;
   background: rgba(10, 12, 11, 0.82);
@@ -3938,4 +3944,124 @@ select:disabled {
   .board-workspace.floating-launching .canvas-frame::after {
     animation: none;
   }
+}
+
+.keybinding-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.keybinding-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+
+.keybinding-group {
+  display: grid;
+  gap: 10px;
+}
+
+.keybinding-list {
+  display: grid;
+  gap: 8px;
+}
+
+.keybinding-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  color: #dfe9e4;
+  background: #202322;
+  border: 1px solid #414643;
+  border-radius: 6px;
+}
+
+.keybinding-row.conflict {
+  border-color: #a65b58;
+}
+
+.keybinding-label {
+  overflow: hidden;
+  color: #aeb7b3;
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.keybinding-chip {
+  min-width: 96px;
+  padding: 4px 8px;
+  color: #dfe9e4;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: center;
+  white-space: nowrap;
+  background: #1b1d1c;
+  border: 1px solid #3d413f;
+  border-radius: 5px;
+}
+
+.keybinding-row.conflict .keybinding-chip {
+  color: #f2d6d4;
+  border-color: #a65b58;
+}
+
+.keybinding-record,
+.keybinding-reset,
+.keybinding-reset-all {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 10px;
+  color: #cbd2ce;
+  font-size: 11px;
+  background: #383b3a;
+  border: 1px solid #4d5350;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.keybinding-record:hover,
+.keybinding-reset:hover:not(:disabled),
+.keybinding-reset-all:hover:not(:disabled) {
+  color: #ffffff;
+  background: #454847;
+  border-color: #656968;
+}
+
+.keybinding-record.active {
+  color: #ffffff;
+  background: #326fca;
+  border-color: #5595f2;
+}
+
+.keybinding-reset:disabled,
+.keybinding-reset-all:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.keybinding-conflict {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: #e0a3a0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.keybinding-reset-all {
+  justify-self: end;
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
 }

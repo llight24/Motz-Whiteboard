@@ -53,6 +53,19 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 import pauseIconSvg from "../暂停.svg?raw";
 import playIconSvg from "../播放.svg?raw";
+import { KeybindingsPanel } from "./KeybindingsPanel.jsx";
+import {
+  ensureLibraryHydrated,
+  hasAnyLibraryStoredData,
+  isLibraryStorageKey,
+  libraryStorageKey,
+  persistLibraryData,
+  readLibraryValue,
+  storedLibraryIds,
+  subscribeLibraryKey,
+  writeLibraryValue,
+} from "./dataStore.js";
+import { defaultKeybindings, matchesKeybinding, normalizeKeybindings } from "./keybindings.js";
 
 const initialAssets = [];
 
@@ -64,7 +77,7 @@ const boardTones = ["blue", "violet", "green", "amber"];
 
 const initialBoardItems = {};
 const defaultLibraryId = "library-default";
-const initialLibraries = [{ id: defaultLibraryId, name: "默认库", root: "", importMode: "copy" }];
+const initialLibraries = [{ id: defaultLibraryId, name: "默认库", root: "" }];
 const storedStateWriteDelay = 320;
 const boardHistoryLimit = 80;
 const initialAssetRenderLimit = 64;
@@ -135,16 +148,28 @@ function readStoredValue(key, initialValue) {
   return typeof initialValue === "function" ? initialValue() : initialValue;
 }
 
+// 索引、键位与库内设置住在素材库目录下的 .motz_data 里，其余窗口级偏好继续留在 localStorage。
+function readStateValue(key, initialValue) {
+  return isLibraryStorageKey(key) ? readLibraryValue(key, initialValue) : readStoredValue(key, initialValue);
+}
+
 function useStoredState(key, initialValue) {
   const initialValueRef = useRef(initialValue);
-  const [state, setState] = useState(() => ({ key, value: readStoredValue(key, initialValue) }));
-  const value = state.key === key ? state.value : readStoredValue(key, initialValue);
+  const libraryScoped = isLibraryStorageKey(key);
+  const [state, setState] = useState(() => ({ key, value: readStateValue(key, initialValue) }));
+  const value = state.key === key ? state.value : readStateValue(key, initialValue);
 
   useEffect(() => {
-    if (state.key !== key) setState({ key, value: readStoredValue(key, initialValueRef.current) });
+    if (state.key !== key) setState({ key, value: readStateValue(key, initialValueRef.current) });
   }, [key, state.key]);
 
   useEffect(() => {
+    // 跟随素材库的数据由 dataStore 统一节流落盘。
+    if (libraryScoped) {
+      writeLibraryValue(key, value);
+      return undefined;
+    }
+
     const writeValue = () => {
       try {
         window.localStorage.setItem(key, JSON.stringify(value));
@@ -175,9 +200,15 @@ function useStoredState(key, initialValue) {
       cancelScheduledWrite();
       window.removeEventListener("beforeunload", flushBeforeUnload);
     };
-  }, [key, value]);
+  }, [key, value, libraryScoped]);
 
   useEffect(() => {
+    if (libraryScoped) {
+      return subscribeLibraryKey(key, (nextValue) => {
+        setState((current) => (current.key === key && Object.is(current.value, nextValue) ? current : { key, value: nextValue }));
+      });
+    }
+
     const syncFromStorage = (event) => {
       if (event.key !== key || !event.newValue) return;
       try {
@@ -193,7 +224,7 @@ function useStoredState(key, initialValue) {
 
     window.addEventListener("storage", syncFromStorage);
     return () => window.removeEventListener("storage", syncFromStorage);
-  }, [key]);
+  }, [key, libraryScoped]);
 
   const setStoredValue = useCallback((updater) => {
     setState((current) => {
@@ -662,12 +693,13 @@ function sortAssets(items, mode) {
 
 function hasExistingWorkspace() {
   try {
-    return ["reference-board-libraries", "reference-board-assets", "reference-board-folders", "reference-board-boards", "reference-board-items"].some(
-      (key) => window.localStorage.getItem(key),
-    );
+    const legacyKeys = ["reference-board-libraries", "reference-board-assets", "reference-board-folders", "reference-board-boards", "reference-board-items"];
+    if (legacyKeys.some((key) => window.localStorage.getItem(key))) return true;
   } catch {
-    return false;
+    // localStorage 不可用时只按素材库目录里的数据判断。
   }
+  // 迁移之后旧的 localStorage 键会被清掉，此时以 .motz_data 里是否已有内容为准。
+  return hasAnyLibraryStoredData(storedLibraryIds());
 }
 
 function createTransientVideoAsset(file, index = 0, folderName = "", metadata = {}, tags = []) {
@@ -2337,17 +2369,27 @@ function boundsFromItems(items) {
 
 const keyboardNudgeStep = 5;
 
-// W/A/S/D 与方向键：W 上对齐、A 左对齐、S 下对齐、D 右对齐。
-const keyboardArrangementKeys = {
-  w: "top",
+// 方向键固定作为对齐/移动的备用键，主键位（默认 W/A/S/D）可在设置面板里改。
+const keyboardArrangementFallbackKeys = {
   arrowup: "top",
-  a: "left",
   arrowleft: "left",
-  s: "bottom",
   arrowdown: "bottom",
-  d: "right",
   arrowright: "right",
 };
+
+function arrangementAnchorForEvent(event, bindings) {
+  if (matchesKeybinding(event, bindings?.arrangeTop)) return "top";
+  if (matchesKeybinding(event, bindings?.arrangeLeft)) return "left";
+  if (matchesKeybinding(event, bindings?.arrangeBottom)) return "bottom";
+  if (matchesKeybinding(event, bindings?.arrangeRight)) return "right";
+  if (event.ctrlKey || event.metaKey || event.altKey) return "";
+  return keyboardArrangementFallbackKeys[event.key.toLowerCase()] || "";
+}
+
+// Ctrl+Y 保留为「重做」的固定别名，主键位（默认 Ctrl+Shift+Z）可在设置面板里改。
+function isRedoAlias(event) {
+  return (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "y";
+}
 
 // 画布与浮窗画布共用：选中多个素材时把同类边对齐到选区外框，只选中一个时按 5px 步进移动。
 function keyboardArrangementPositions(items, selectedIds, anchor) {
@@ -2484,17 +2526,11 @@ function normalizeLibraries(libraries) {
         id,
         name: sanitizeName(library?.name) || (id === defaultLibraryId ? "默认库" : `素材库 ${index + 1}`),
         root: typeof library?.root === "string" ? library.root : "",
-        importMode: library?.importMode === "reference" ? "reference" : "copy",
       };
     })
     .filter(Boolean);
 
   return normalized.length > 0 ? normalized : initialLibraries;
-}
-
-function libraryStorageKey(libraryId, area) {
-  if (!libraryId || libraryId === defaultLibraryId) return `reference-board-${area}`;
-  return `reference-board-library-${libraryId}-${area}`;
 }
 
 export function App() {
@@ -2508,6 +2544,10 @@ export function App() {
   const [folders, setFolders] = useStoredState(libraryStorageKey(effectiveLibraryId, "folders"), initialFolders);
   const [boardItems, setBoardItems] = useStoredState(libraryStorageKey(effectiveLibraryId, "items"), initialBoardItems);
   const { checkpointBoardItems, undoBoardItems, redoBoardItems } = useBoardHistory(boardItems, setBoardItems, effectiveLibraryId);
+  const [keybindings, setKeybindings] = useStoredState(libraryStorageKey(effectiveLibraryId, "keybindings"), defaultKeybindings);
+  const activeKeybindings = useMemo(() => normalizeKeybindings(keybindings), [keybindings]);
+  const [storedImportMode] = useStoredState(libraryStorageKey(effectiveLibraryId, "import-mode"), "copy");
+  const activeImportMode = storedImportMode === "reference" ? "reference" : "copy";
 
   useEffect(() => {
     if (JSON.stringify(normalizedLibraries) === JSON.stringify(libraries)) return;
@@ -2533,6 +2573,8 @@ export function App() {
         setAssets={setAssets}
         setBoardItems={setBoardItems}
         activeLibrary={activeLibrary}
+        importMode={activeImportMode}
+        keybindings={activeKeybindings}
       />
     );
   }
@@ -2548,12 +2590,14 @@ export function App() {
       activeLibrary={activeLibrary}
       activeLibraryId={effectiveLibraryId}
       storagePrefix={effectiveLibraryId}
+      keybindings={activeKeybindings}
       setAssets={setAssets}
       setBoards={setBoards}
       setBoardItems={setBoardItems}
       setFolders={setFolders}
       setLibraries={setLibraries}
       setActiveLibraryId={setActiveLibraryId}
+      setKeybindings={setKeybindings}
       undoBoardItems={undoBoardItems}
       redoBoardItems={redoBoardItems}
     />
@@ -2570,12 +2614,14 @@ function Workspace({
   activeLibrary,
   activeLibraryId,
   storagePrefix,
+  keybindings,
   setAssets,
   setBoards,
   setBoardItems,
   setFolders,
   setLibraries,
   setActiveLibraryId,
+  setKeybindings,
   undoBoardItems,
   redoBoardItems,
 }) {
@@ -2585,6 +2631,7 @@ function Workspace({
   const [activeFolder, setActiveFolder] = useState("");
   const [colorFilter, setColorFilter] = useState("all");
   const [selectedTagFilters, setSelectedTagFilters] = useStoredState(libraryStorageKey(storagePrefix, "selected-tag-filters"), []);
+  const [libraryImportMode, setLibraryImportMode] = useStoredState(libraryStorageKey(storagePrefix, "import-mode"), "copy");
   const [selectedAssetId, setSelectedAssetId] = useState("");
   const [selectedBoardItemId, setSelectedBoardItemId] = useState("");
   const [query, setQuery] = useState("");
@@ -2658,7 +2705,7 @@ function Workspace({
   }, []);
 
   const activeBoard = boards.find((board) => board.id === activeBoardId);
-  const activeImportMode = activeLibrary?.importMode === "reference" ? "reference" : "copy";
+  const activeImportMode = libraryImportMode === "reference" ? "reference" : "copy";
   const activeItems = activeBoard ? (boardItems[activeBoardId] ?? []) : [];
   const liveAssets = useMemo(() => assets.filter((asset) => !isAssetTrashed(asset)), [assets]);
   const libraryAssets = useMemo(() => liveAssets.filter((asset) => !isBoardFileAsset(asset)), [liveAssets]);
@@ -2907,7 +2954,7 @@ function Workspace({
     if (!previewAssetId) return undefined;
 
     const handleKeyDown = (event) => {
-      if (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      if (matchesKeybinding(event, keybindings.preview)) {
         event.preventDefault();
         event.stopImmediatePropagation();
         setPreviewAssetId("");
@@ -3009,6 +3056,7 @@ function Workspace({
 
   useEffect(() => {
     let mounted = true;
+    ensureLibraryHydrated(activeLibrary?.id);
     const activatePromise = window.referenceBoard?.activateLibrary
       ? window.referenceBoard.activateLibrary(activeLibrary)
       : window.referenceBoard?.getLibraryRoot?.(activeLibrary?.id);
@@ -3044,21 +3092,21 @@ function Workspace({
       const focusInAssetPanel = Boolean(document.activeElement?.closest?.(".asset-panel"));
       if (!targetInAssetPanel && !focusInAssetPanel) return;
 
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      if (matchesKeybinding(event, keybindings.selectAllAssets)) {
         event.preventDefault();
         event.stopImmediatePropagation();
         selectAllFilteredAssets();
         return;
       }
 
-      if ((event.key === "Delete" || event.key === "Backspace") && selectedAssetIds.size > 0) {
+      if ((matchesKeybinding(event, keybindings.deleteSelection) || event.key === "Backspace") && selectedAssetIds.size > 0) {
         event.preventDefault();
         event.stopImmediatePropagation();
         confirmDeleteSelectedAssets();
         return;
       }
 
-      if (event.code === "Space" && !event.ctrlKey && !event.metaKey && !event.altKey && selectedAsset) {
+      if (matchesKeybinding(event, keybindings.preview) && selectedAsset) {
         event.preventDefault();
         event.stopImmediatePropagation();
         setPreviewAssetId(selectedAsset.id);
@@ -3195,15 +3243,15 @@ function Workspace({
     setLibraries((current) =>
       normalizeLibraries(current).map((library) => (library.id === activeLibraryId ? { ...library, root: result.libraryRoot || "" } : library)),
     );
+    // 索引与设置跟着素材库走：换了保存位置就把内存里的库数据补写到新目录。
+    persistLibraryData(activeLibraryId);
     showToast(`已更新“${activeLibrary?.name || "当前库"}”的保存位置`);
     return result;
   }
 
   function updateActiveLibraryImportMode(importMode) {
     const normalizedMode = importMode === "reference" ? "reference" : "copy";
-    setLibraries((current) =>
-      normalizeLibraries(current).map((library) => (library.id === activeLibraryId ? { ...library, importMode: normalizedMode } : library)),
-    );
+    setLibraryImportMode(normalizedMode);
     showToast(normalizedMode === "reference" ? "本机文件将使用引用方式导入" : "本机文件将复制副本到素材库");
   }
 
@@ -3216,10 +3264,9 @@ function Workspace({
     event.preventDefault();
     const name = sanitizeName(onboardingName) || "我的素材库";
     setLibraries((current) =>
-      normalizeLibraries(current).map((library, index) =>
-        index === 0 ? { ...library, name, importMode: onboardingImportMode === "reference" ? "reference" : "copy", root: libraryRoot || library.root } : library,
-      ),
+      normalizeLibraries(current).map((library, index) => (index === 0 ? { ...library, name, root: libraryRoot || library.root } : library)),
     );
+    setLibraryImportMode(onboardingImportMode === "reference" ? "reference" : "copy");
     setOnboardingComplete(true);
     showToast(`已创建素材库“${name}”`);
   }
@@ -3324,6 +3371,7 @@ function Workspace({
   function switchLibrary(libraryId) {
     if (!libraryId || libraryId === activeLibraryId) return;
     setLibrarySwitcherMenu(null);
+    ensureLibraryHydrated(libraryId);
     setActiveLibraryId(libraryId);
     setActiveCollection("all");
     setActiveFolder("");
@@ -3588,7 +3636,9 @@ function Workspace({
       }
 
       const libraryId = `library-${Date.now()}`;
-      const nextLibrary = { id: libraryId, name, root: "", importMode: "copy" };
+      const nextLibrary = { id: libraryId, name, root: "" };
+      // 先加载新库的 .motz_data 再切过去，避免切换瞬间用默认值回写覆盖磁盘数据。
+      await ensureLibraryHydrated(libraryId);
       setLibraries((current) => [...normalizeLibraries(current), nextLibrary]);
       setActiveLibraryId(libraryId);
       setActiveCollection("all");
@@ -5748,7 +5798,7 @@ function Workspace({
                 onDragEnd={endAssetCardDrag}
                 onContextMenu={(event) => showAssetMenu(event, asset)}
                 onKeyDown={(event) => {
-                  if (event.key !== "Delete" || isTextEditingTarget(event.target)) return;
+                  if (!matchesKeybinding(event, keybindings.deleteSelection) || isTextEditingTarget(event.target)) return;
                   event.preventDefault();
                   event.stopPropagation();
                   if (isMultiSelected && selectedAssetIds.size > 1) {
@@ -5978,6 +6028,7 @@ function Workspace({
           checkpointBoardItems={checkpointBoardItems}
           deleteBoardItems={deleteBoardItems}
           floatingLaunchActive={floatingLaunchActive}
+          keybindings={keybindings}
           openFloatingBoard={openFloatingBoardWithMotion}
           pasteImagesToBoard={pasteImagesToBoard}
           selectedBoardItemId={selectedBoardItemId}
@@ -6604,6 +6655,18 @@ function Workspace({
               </fieldset>
               <p className="settings-note">网页、剪贴板和外部白板中的素材仍会复制进库，以保证内容可以长期使用。</p>
             </div>
+            <div className="settings-section">
+              <div className="settings-section-heading">
+                <strong>键位</strong>
+                <span>索引、键位与设置都存在素材库目录下的 .motz_data 里，随素材库一起搬走</span>
+              </div>
+              <KeybindingsPanel
+                bindings={keybindings}
+                onChange={(actionId, accelerator) => setKeybindings((current) => ({ ...normalizeKeybindings(current), [actionId]: accelerator }))}
+                onReset={(actionId) => setKeybindings((current) => ({ ...normalizeKeybindings(current), [actionId]: defaultKeybindings[actionId] }))}
+                onResetAll={() => setKeybindings({ ...defaultKeybindings })}
+              />
+            </div>
           </section>
         </div>
       ) : null}
@@ -6675,6 +6738,7 @@ function Canvas({
   checkpointBoardItems,
   deleteBoardItems,
   floatingLaunchActive,
+  keybindings,
   openFloatingBoard,
   pasteImagesToBoard,
   selectedBoardItemId,
@@ -6938,7 +7002,7 @@ function Canvas({
     if (selectedBoardItemIds.size === 0) return undefined;
 
     const handleKeyDown = (event) => {
-      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (!matchesKeybinding(event, keybindings.deleteSelection) && event.key !== "Backspace") return;
       if (isTextEditingTarget(event.target) || canvasPreviewAssetId) return;
       event.preventDefault();
       deleteBoardItems(selectedBoardItemIds);
@@ -6955,9 +7019,9 @@ function Canvas({
     if (selectedBoardItemIds.size === 0) return undefined;
 
     const handleArrangementKeyDown = (event) => {
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.defaultPrevented) return;
       if (isTextEditingTarget(event.target) || canvasPreviewAssetId) return;
-      const anchor = keyboardArrangementKeys[event.key.toLowerCase()];
+      const anchor = arrangementAnchorForEvent(event, keybindings);
       if (!anchor) return;
       // 焦点在画布内才响应，避免在素材库等其它区域按键时波及白板选区。
       const frame = frameRef.current;
@@ -6983,15 +7047,15 @@ function Canvas({
 
   useEffect(() => {
     const handleCanvasPreviewKeyDown = (event) => {
-      if (event.ctrlKey || event.metaKey || event.altKey || isTextEditingTarget(event.target)) return;
+      if (isTextEditingTarget(event.target)) return;
       if (canvasPreviewAssetId) {
-        if (event.code !== "Space" && event.key !== "Escape") return;
+        if (!matchesKeybinding(event, keybindings.preview) && event.key !== "Escape") return;
         event.preventDefault();
         event.stopImmediatePropagation();
         closeCanvasPreview();
         return;
       }
-      if (event.code !== "Space") return;
+      if (!matchesKeybinding(event, keybindings.preview)) return;
       // 焦点在画布内才响应，避免和素材库的空格预览互相顶掉。
       const frame = frameRef.current;
       const activeElement = document.activeElement;
@@ -7010,15 +7074,15 @@ function Canvas({
   useEffect(() => {
     const handleHistoryKeyDown = (event) => {
       if (event.defaultPrevented || isTextEditingTarget(event.target)) return;
-      if (!event.ctrlKey && !event.metaKey) return;
+      // 弹窗打开时不响应，避免在设置里录制键位时顺手改动背后的白板。
+      if (document.querySelector(".dialog-backdrop")) return;
+      const wantsUndo = matchesKeybinding(event, keybindings.undo);
+      const wantsRedo = matchesKeybinding(event, keybindings.redo) || isRedoAlias(event);
+      if (!wantsUndo && !wantsRedo) return;
+
       const frame = frameRef.current;
       const activeElement = document.activeElement;
       if (!frame || (activeElement !== frame && !frame.contains(activeElement))) return;
-
-      const key = event.key.toLowerCase();
-      const wantsUndo = key === "z" && !event.shiftKey;
-      const wantsRedo = (key === "z" && event.shiftKey) || key === "y";
-      if (!wantsUndo && !wantsRedo) return;
 
       const restored = wantsRedo ? redoBoardItems(activeBoardId) : undoBoardItems(activeBoardId);
       if (!restored) return;
@@ -8006,6 +8070,8 @@ function FloatingBoard({
   setAssets,
   setBoardItems,
   activeLibrary,
+  importMode,
+  keybindings,
 }) {
   const [zoom, setZoom] = useState(0.94);
   const [controlsVisible, setControlsVisible] = useState(false);
@@ -8224,7 +8290,7 @@ function FloatingBoard({
 
   useEffect(() => {
     const handleFloatingPreviewKeyDown = (event) => {
-      if (event.code !== "Space" || event.ctrlKey || event.metaKey || event.altKey || isTextEditingTarget(event.target)) return;
+      if (!matchesKeybinding(event, keybindings.preview) || isTextEditingTarget(event.target)) return;
       if (floatingPreviewAssetId) {
         event.preventDefault();
         event.stopImmediatePropagation();
@@ -8246,7 +8312,7 @@ function FloatingBoard({
     if (selectedFloatingIds.size === 0) return undefined;
 
     const handleKeyDown = (event) => {
-      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (!matchesKeybinding(event, keybindings.deleteSelection) && event.key !== "Backspace") return;
       if (isTextEditingTarget(event.target) || floatingPreviewAssetId) return;
       event.preventDefault();
       deleteFloatingItems(selectedFloatingIds);
@@ -8260,9 +8326,9 @@ function FloatingBoard({
     if (selectedFloatingIds.size === 0) return undefined;
 
     const handleArrangementKeyDown = (event) => {
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.defaultPrevented) return;
       if (isTextEditingTarget(event.target) || floatingPreviewAssetId) return;
-      const anchor = keyboardArrangementKeys[event.key.toLowerCase()];
+      const anchor = arrangementAnchorForEvent(event, keybindings);
       if (!anchor) return;
       const positions = keyboardArrangementPositions(items, selectedFloatingIds, anchor);
       if (!positions) return;
@@ -8284,15 +8350,15 @@ function FloatingBoard({
   useEffect(() => {
     const handleHistoryKeyDown = (event) => {
       if (event.defaultPrevented || isTextEditingTarget(event.target)) return;
-      if (!event.ctrlKey && !event.metaKey) return;
+      // 弹窗打开时不响应，避免在设置里录制键位时顺手改动背后的白板。
+      if (document.querySelector(".dialog-backdrop")) return;
+      const wantsUndo = matchesKeybinding(event, keybindings.undo);
+      const wantsRedo = matchesKeybinding(event, keybindings.redo) || isRedoAlias(event);
+      if (!wantsUndo && !wantsRedo) return;
+
       const shell = floatingShellRef.current;
       const activeElement = document.activeElement;
       if (!shell || (activeElement !== shell && !shell.contains(activeElement))) return;
-
-      const key = event.key.toLowerCase();
-      const wantsUndo = key === "z" && !event.shiftKey;
-      const wantsRedo = (key === "z" && event.shiftKey) || key === "y";
-      if (!wantsUndo && !wantsRedo) return;
 
       const restored = wantsRedo ? redoBoardItems(board.id) : undoBoardItems(board.id);
       if (!restored) return;
@@ -8460,7 +8526,7 @@ function FloatingBoard({
     });
 
     if (filesWithPaths.length > 0 && window.referenceBoard?.importImagePaths) {
-      const result = await window.referenceBoard.importImagePaths(filesWithPaths, "", typeLabel, activeLibrary?.importMode === "reference" ? "reference" : "copy");
+      const result = await window.referenceBoard.importImagePaths(filesWithPaths, "", typeLabel, importMode === "reference" ? "reference" : "copy");
       importedAssets.push(...(result.assets ?? []));
     }
 

@@ -24,6 +24,17 @@ contextBridge.exposeInMainWorld("referenceBoard", {
   listSystemFonts: () => ipcRenderer.invoke("list-system-fonts"),
   getLibraryRoot: (libraryId) => ipcRenderer.invoke("get-library-root", libraryId),
   activateLibrary: (library) => ipcRenderer.invoke("activate-library", library),
+  readLibraryData: (libraryId) => ipcRenderer.invoke("read-library-data", libraryId),
+  readAllLibraryData: (libraryIds) => ipcRenderer.invoke("read-all-library-data", libraryIds),
+  writeLibraryData: (libraryId, area, value) => ipcRenderer.invoke("write-library-data", libraryId, area, value),
+  writeLibraryDataSync: (libraryId, area, value) => ipcRenderer.sendSync("write-library-data-sync", libraryId, area, value),
+  migrateLegacyLibraryData: (entries) => ipcRenderer.invoke("migrate-legacy-library-data", entries),
+  onLibraryDataChanged: (callback) => {
+    if (typeof callback !== "function") return () => {};
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("library-data-changed", listener);
+    return () => ipcRenderer.removeListener("library-data-changed", listener);
+  },
   chooseLibraryRoot: (libraryId) => ipcRenderer.invoke("choose-library-root", libraryId),
   saveBoardFile: (payload) => ipcRenderer.invoke("save-board-file", payload),
   openBoardFile: () => ipcRenderer.invoke("open-board-file"),

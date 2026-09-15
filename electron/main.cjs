@@ -132,6 +132,156 @@ function activateLibraryRoot(library = {}) {
   return libraryRoot;
 }
 
+// ---------------------------------------------------------------------------
+// 素材库自带的 .motz_data：索引、键位与库内设置跟着素材库文件夹走，把整个库拷到
+// 别的盘或别的机器，这些数据都跟着一起搬家。
+// 库注册表（哪个 id 对应哪个根目录、当前激活的是哪个库）必须留在 userData，
+// 否则启动时无从得知该去哪个文件夹读 .motz_data；所以 userData/settings.json
+// 只保留这份指针，其余数据一律进库。
+// ---------------------------------------------------------------------------
+const motzDataDirName = ".motz_data";
+const motzDataIndexFile = "index.json";
+const motzDataSettingsFile = "settings.json";
+const motzDataKeybindingsFile = "keybindings.json";
+const motzDataKeybindingsArea = "keybindings";
+const motzDataIndexAreas = new Set(["assets", "boards", "folders", "items"]);
+const motzDataAreas = new Set([
+  ...motzDataIndexAreas,
+  motzDataKeybindingsArea,
+  "import-mode",
+  "selected-tag-filters",
+  "asset-sort-mode",
+  "board-view-states",
+  "collapsed-folders",
+]);
+
+function motzDataDir(libraryRoot) {
+  return path.join(libraryRoot, motzDataDirName);
+}
+
+function motzDataFilePath(libraryRoot, area) {
+  if (area === motzDataKeybindingsArea) return path.join(motzDataDir(libraryRoot), motzDataKeybindingsFile);
+  return path.join(motzDataDir(libraryRoot), motzDataIndexAreas.has(area) ? motzDataIndexFile : motzDataSettingsFile);
+}
+
+// 素材库里的 .motz_data 是软件自己的数据，默认在资源管理器里隐藏，免得和素材混在一起。
+// Windows 的隐藏属性没有 Node API，只能借系统自带的 attrib；macOS / Linux 下点号开头本就隐藏。
+function hideMotzDataDir(dirPath) {
+  if (process.platform !== "win32") return;
+  try {
+    execFileSync("attrib", ["+h", dirPath], { windowsHide: true, stdio: "ignore" });
+  } catch {
+    // 隐藏失败只影响资源管理器里的观感，不影响读写。
+  }
+}
+
+// 老版本已经建好的 .motz_data 不会走“新建目录”那条分支，启动时补一次隐藏。
+function hideExistingMotzDataDirs() {
+  if (process.platform !== "win32") return;
+  const settings = readSettings();
+  const libraryRoots = settings.libraryRoots && typeof settings.libraryRoots === "object" ? settings.libraryRoots : {};
+  const roots = new Set([getLibraryRoot(), ...Object.values(libraryRoots).map((root) => String(root || "").trim())]);
+  roots.forEach((root) => {
+    if (!root) return;
+    const dir = motzDataDir(root);
+    if (fs.existsSync(dir)) hideMotzDataDir(dir);
+  });
+}
+
+function readMotzJson(filePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    // 文件不存在或损坏时返回 null：调用方据此区分“还没有数据”和“数据是空的”。
+    return null;
+  }
+}
+
+// 素材库可能在网络盘、同步盘或被杀毒实时扫描，直接覆写有被读到半截文件的风险，
+// 因此一律先写临时文件再原子替换。
+function writeMotzJson(filePath, value) {
+  const dir = path.dirname(filePath);
+  const isNewDir = !fs.existsSync(dir);
+  fs.mkdirSync(dir, { recursive: true });
+  if (isNewDir) hideMotzDataDir(dir);
+  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tempPath, JSON.stringify(value, null, 2), "utf8");
+  fs.renameSync(tempPath, filePath);
+}
+
+function readLibraryDataBundle(libraryRoot) {
+  return {
+    index: readMotzJson(path.join(motzDataDir(libraryRoot), motzDataIndexFile)) ?? {},
+    settings: readMotzJson(path.join(motzDataDir(libraryRoot), motzDataSettingsFile)) ?? {},
+    keybindings: readMotzJson(path.join(motzDataDir(libraryRoot), motzDataKeybindingsFile)),
+  };
+}
+
+function libraryDataEntry(libraryId) {
+  const id = librarySettingsId(libraryId);
+  const root = getLibraryRoot(id);
+  return { libraryId: id, root, hasData: fs.existsSync(motzDataDir(root)), data: readLibraryDataBundle(root) };
+}
+
+function liveWindows() {
+  return [mainWindowRef, ...floatingWindows.values()].filter((window) => window && !window.isDestroyed());
+}
+
+// 主窗口与浮窗共用同一份库数据，写盘后广播给其它窗口，替代原先 localStorage 的 storage 事件。
+function broadcastLibraryData(change, sender) {
+  liveWindows().forEach((window) => {
+    if (sender && window.webContents === sender) return;
+    window.webContents.send("library-data-changed", change);
+  });
+}
+
+function writeLibraryDataArea(libraryId, area, value, sender) {
+  if (!motzDataAreas.has(area)) return { ok: false, reason: "unknown-area" };
+  const id = librarySettingsId(libraryId);
+  const root = getLibraryRoot(id);
+  const filePath = motzDataFilePath(root, area);
+  // keybindings.json 整份就是键位表，可以直接手改；索引与设置则按区域名合并写入。
+  const next = area === motzDataKeybindingsArea ? value : { ...(readMotzJson(filePath) ?? {}), [area]: value };
+  writeMotzJson(filePath, next);
+  broadcastLibraryData({ libraryId: id, area, value }, sender);
+  return { ok: true, libraryId: id, root, file: filePath };
+}
+
+// 旧版本把索引与设置放在 localStorage / userData，首次运行时搬进 .motz_data，
+// 并在 userData 留一份原始备份。目标位置已有数据的项不覆盖，保证可重复执行。
+function migrateLegacyLibraryData(entries) {
+  const normalized = (Array.isArray(entries) ? entries : [])
+    .map((entry) => ({
+      libraryId: librarySettingsId(entry?.libraryId),
+      area: String(entry?.area || ""),
+      value: entry?.value,
+    }))
+    .filter((entry) => motzDataAreas.has(entry.area));
+  if (normalized.length === 0) return { migrated: [], backupFile: "" };
+
+  const backupDir = path.join(app.getPath("userData"), "migration-backup");
+  fs.mkdirSync(backupDir, { recursive: true });
+  const backupFile = path.join(backupDir, `legacy-library-data-${Date.now()}.json`);
+  fs.writeFileSync(backupFile, JSON.stringify(normalized, null, 2), "utf8");
+
+  const migrated = [];
+  normalized.forEach(({ libraryId, area, value }) => {
+    const filePath = motzDataFilePath(getLibraryRoot(libraryId), area);
+    if (area === motzDataKeybindingsArea) {
+      if (fs.existsSync(filePath)) return;
+      writeMotzJson(filePath, value);
+    } else {
+      const current = readMotzJson(filePath) ?? {};
+      if (Object.prototype.hasOwnProperty.call(current, area)) return;
+      writeMotzJson(filePath, { ...current, [area]: value });
+    }
+    migrated.push({ libraryId, area });
+  });
+
+  return { migrated, backupFile };
+}
+
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes)) return "本地图片";
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -154,7 +304,7 @@ function scanMediaFiles(directory) {
     entries.forEach((entry) => {
       const fullPath = path.join(current, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === ".motz-board-assets") return;
+        if (entry.name === ".motz-board-assets" || entry.name === motzDataDirName) return;
         stack.push(fullPath);
         return;
       }
@@ -2019,6 +2169,7 @@ app.whenReady().then(() => {
     callback(filePath ? { path: filePath } : { error: -6 });
   });
   Menu.setApplicationMenu(null);
+  hideExistingMotzDataDirs();
   startPluginBridgeServer();
   ipcMain.on("renderer-ready", (event) => {
     if (!mainWindowRef || mainWindowRef.isDestroyed() || event.sender !== mainWindowRef.webContents) return;
@@ -2091,6 +2242,16 @@ app.whenReady().then(() => {
     fs.mkdirSync(libraryRoot, { recursive: true });
     return libraryRoot;
   });
+  ipcMain.handle("read-library-data", (_event, libraryId = "") => libraryDataEntry(libraryId));
+  ipcMain.handle("read-all-library-data", (_event, libraryIds) => ({
+    libraries: Array.from(new Set((Array.isArray(libraryIds) ? libraryIds : []).map((id) => librarySettingsId(id)))).map((id) => libraryDataEntry(id)),
+  }));
+  ipcMain.handle("write-library-data", (event, libraryId = "", area = "", value) => writeLibraryDataArea(libraryId, area, value, event.sender));
+  // 关闭窗口时用同步通道把最后一次待写数据落盘，异步 invoke 会随渲染进程销毁被丢弃。
+  ipcMain.on("write-library-data-sync", (event, libraryId = "", area = "", value) => {
+    event.returnValue = writeLibraryDataArea(libraryId, area, value, event.sender);
+  });
+  ipcMain.handle("migrate-legacy-library-data", (_event, entries) => migrateLegacyLibraryData(entries));
   ipcMain.handle("get-media-url", (_event, filePath) => mediaUrlForPath(filePath));
   ipcMain.handle("activate-library", (_event, library = {}) => {
     return activateLibraryRoot(library);
@@ -2280,6 +2441,11 @@ app.whenReady().then(() => {
       const normalizedPath = normalizeFileCheckPath(filePath);
       if (!normalizedPath || !isPathInside(libraryRoot, normalizedPath)) {
         failed.push({ filePath, reason: "not-library-file" });
+        return;
+      }
+      // .motz_data 存的是索引与设置，不是素材，误删会造成整库索引丢失。
+      if (isPathInside(motzDataDir(libraryRoot), normalizedPath)) {
+        failed.push({ filePath: normalizedPath, reason: "protected-data-dir" });
         return;
       }
       if (!fs.existsSync(normalizedPath)) {
