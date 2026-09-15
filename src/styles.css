@@ -2409,6 +2409,36 @@ select:disabled {
   outline: 0;
 }
 
+.link-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.link-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  color: #d8dddb;
+  background: #242626;
+  border: 1px solid #171818;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.link-open:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.link-open:disabled {
+  color: #6d7573;
+  cursor: default;
+}
+
 .bulk-inspector {
   display: grid;
   align-content: start;

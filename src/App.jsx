@@ -11,6 +11,7 @@ import {
   CircleDot,
   Clipboard,
   Clock3,
+  ExternalLink,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -2688,6 +2689,7 @@ function Workspace({
   const boardsRef = useRef(boards);
   const thumbnailRequestSourcesRef = useRef(new Set());
   const thumbnailLibraryRef = useRef(storagePrefix);
+  const autoRefreshedLibrariesRef = useRef(new Set());
 
   useEffect(() => window.referenceBoard?.onNativeFileDragEnd?.(() => {
     draggingAssetIdsRef.current = [];
@@ -2797,7 +2799,7 @@ function Workspace({
 
         const matchesQuery =
           !normalizedQuery ||
-          [asset.title, asset.folder, asset.type, asset.source, asset.originalSource, asset.remoteSource, ...asset.tags]
+          [asset.title, asset.folder, asset.type, asset.source, asset.originalSource, asset.remoteSource, asset.link, ...asset.tags]
             .join(" ")
             .toLowerCase()
             .includes(normalizedQuery);
@@ -3068,6 +3070,8 @@ function Workspace({
           normalizeLibraries(current).map((library) => (library.id === activeLibrary.id ? { ...library, root: rootPath } : library)),
         );
       }
+      // 库路径定下来之后再刷新，扫到的才是这个库自己的目录；每个库每次启动只自动刷一次。
+      autoRefreshLibraryOnce(activeLibrary?.id);
     });
     return () => {
       mounted = false;
@@ -4171,7 +4175,7 @@ function Workspace({
       return;
     }
 
-    if (/^https?:\/\//i.test(originalSource)) {
+    if (isHttpUrl(originalSource)) {
       window.open(originalSource, "_blank", "noopener,noreferrer");
       return;
     }
@@ -4180,7 +4184,27 @@ function Workspace({
     if (!located) showToast("没有找到原始文件位置");
   }
 
-  async function refreshAssetReferences(assetIds = null) {
+  // 链接对应 Eagle 的 url 字段：素材自己的网页地址，用系统浏览器打开。
+  function openAssetLink(asset) {
+    const link = String(asset?.link || "").trim();
+    if (!isHttpUrl(link)) {
+      showToast("这个素材还没有可打开的链接");
+      return;
+    }
+    window.open(link, "_blank", "noopener,noreferrer");
+  }
+
+  // 启动（以及本次运行里第一次切到某个库）时自动刷新一次：补上直接放进库目录的新文件，
+  // 清掉已经找不到的记录，免得索引和磁盘长期对不上。
+  function autoRefreshLibraryOnce(libraryId) {
+    const id = libraryId || defaultLibraryId;
+    if (!window.referenceBoard?.scanLibraryMedia) return;
+    if (autoRefreshedLibrariesRef.current.has(id)) return;
+    autoRefreshedLibrariesRef.current.add(id);
+    refreshAssetReferences(null, { quiet: true });
+  }
+
+  async function refreshAssetReferences(assetIds = null, options = {}) {
     setAssetMenu(null);
     setLibraryMenu(null);
     const isFullRefresh = !assetIds;
@@ -4202,8 +4226,9 @@ function Workspace({
 
     let nextAssets = assets;
     let relinkedCount = 0;
-    let missingCount = 0;
+    let removedCount = 0;
     let addedCount = 0;
+    const missingIds = new Set();
 
     if (checkEntries.length > 0) {
       if (window.referenceBoard?.resolveMediaReferences) {
@@ -4229,8 +4254,9 @@ function Workspace({
         nextAssets = nextAssets.map((asset) => {
           const resolution = resolutionById.get(asset.id);
           if (!resolution) return asset;
+          // 文件确实找不到了，就不再保留这条记录，直接从索引里去干净。
           if (resolution.status === "missing") {
-            missingCount += 1;
+            missingIds.add(asset.id);
             return asset;
           }
           const patch = { ...(resolution.patch ?? {}) };
@@ -4246,8 +4272,25 @@ function Workspace({
         });
       } else if (window.referenceBoard?.checkMediaPaths) {
         const result = await window.referenceBoard.checkMediaPaths(checkEntries.map((entry) => entry.path));
-        missingCount = checkEntries.filter((entry) => result?.[entry.path] === false).length;
+        checkEntries.forEach(({ asset, path }) => {
+          if (result?.[path] === false) missingIds.add(asset.id);
+        });
       }
+    }
+
+    if (missingIds.size > 0) {
+      removedCount = missingIds.size;
+      nextAssets = nextAssets.filter((asset) => !missingIds.has(asset.id));
+      // 画布上引用这些素材的节点一并清掉，否则会留下打不开的空节点。
+      setBoardItems((current) =>
+        Object.fromEntries(
+          Object.entries(current).map(([boardId, items]) => [boardId, items.filter((item) => !missingIds.has(item.assetId))]),
+        ),
+      );
+      setSelectedAssetId((current) => (missingIds.has(current) ? (nextAssets[0]?.id ?? "") : current));
+      setSelectedAssetIds((current) => new Set(Array.from(current).filter((assetId) => !missingIds.has(assetId))));
+      setPreviewAssetId((current) => (missingIds.has(current) ? "" : current));
+      if (selectedBoardAsset && missingIds.has(selectedBoardAsset.id)) setSelectedBoardItemId("");
     }
 
     if (isFullRefresh && window.referenceBoard?.scanLibraryMedia) {
@@ -4272,8 +4315,9 @@ function Workspace({
     const parts = [];
     if (relinkedCount > 0) parts.push(`重连 ${relinkedCount} 个`);
     if (addedCount > 0) parts.push(`新增 ${addedCount} 个`);
-    if (missingCount > 0) parts.push(`${missingCount} 个仍未找到，已保留记录`);
-    showToast(parts.length > 0 ? `刷新完成：${parts.join("，")}` : "刷新完成，素材库已是最新");
+    if (removedCount > 0) parts.push(`移除 ${removedCount} 个未找到的素材`);
+    if (parts.length > 0) showToast(`${options.quiet ? "已自动刷新素材库" : "刷新完成"}：${parts.join("，")}`);
+    else if (!options.quiet) showToast("刷新完成，素材库已是最新");
   }
 
   function toggleMultiSelectMode() {
@@ -5389,7 +5433,7 @@ function Workspace({
 
         <label className="search-box" aria-label="搜索素材">
           <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、标签、来源" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索名称、标签、来源、链接" />
           {query ? (
             <button type="button" className="search-clear" onClick={() => setQuery("")} title="清除搜索" aria-label="清除搜索">
               <X size={14} />
@@ -6159,6 +6203,33 @@ function Workspace({
             <div className="field-group">
               <label>备注</label>
               <textarea value={inspectorAsset.note} onChange={(event) => updateAsset(inspectorAsset.id, { note: event.target.value })} />
+            </div>
+
+            <div className="field-group">
+              <label>链接</label>
+              <div className="link-field">
+                <input
+                  className="field-value"
+                  value={inspectorAsset.link || ""}
+                  onChange={(event) => updateAsset(inspectorAsset.id, { link: event.target.value })}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") openAssetLink(inspectorAsset);
+                  }}
+                  placeholder="https://"
+                  spellCheck={false}
+                  aria-label="素材链接"
+                />
+                <button
+                  type="button"
+                  className="link-open"
+                  onClick={() => openAssetLink(inspectorAsset)}
+                  disabled={!isHttpUrl(inspectorAsset.link)}
+                  title="在浏览器中打开链接"
+                  aria-label="在浏览器中打开链接"
+                >
+                  <ExternalLink size={14} />
+                </button>
+              </div>
             </div>
 
             <div className="field-group">

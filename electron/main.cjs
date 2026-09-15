@@ -1105,15 +1105,7 @@ async function scanEagleLibrary(libraryPath, onProgress) {
   return { folderIndex, items, skipped };
 }
 
-function eagleAssetNote(libraryName, importMode, annotation) {
-  const base =
-    importMode === "reference"
-      ? `从 Eagle 素材库「${libraryName}」引用原始文件。`
-      : `从 Eagle 素材库「${libraryName}」复制副本到软件素材库。`;
-  return annotation ? `${base}备注：${annotation}` : base;
-}
-
-async function importEagleLibraryItems(items, { libraryName, importMode, existingEagleIds, onProgress }) {
+async function importEagleLibraryItems(items, { importMode, existingEagleIds, onProgress }) {
   const shouldReference = importMode === "reference";
   const existing = new Set(Array.isArray(existingEagleIds) ? existingEagleIds.map((id) => String(id)) : []);
   const assets = new Array(items.length).fill(null);
@@ -1171,16 +1163,17 @@ async function importEagleLibraryItems(items, { libraryName, importMode, existin
           ? { pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight, dimensions: `${item.pixelWidth} x ${item.pixelHeight}` }
           : {}),
         ...(shouldReference ? { libraryCopy: false, referencedSource: true } : {}),
-        ...(item.url ? { remoteSource: item.url } : {}),
+        // Eagle 的备注与链接原样带过来，字段语义与 Eagle 保持一致。
+        note: item.annotation,
+        link: item.url,
       };
-      const note = eagleAssetNote(libraryName, importMode, item.annotation);
       const typeLabel = shouldReference ? "Eagle 引用" : "Eagle 素材";
       const assetSourcePath = shouldReference ? sourcePath : targetPath;
 
       assets[index] =
         item.mediaKind === "video"
-          ? createVideoLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, note, tags, extra)
-          : createLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, note, tags, extra);
+          ? createVideoLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, extra.note, tags, extra)
+          : createLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, extra.note, tags, extra);
     } catch (error) {
       failed.push({ id: item.id, name: item.name, reason: String(error?.message || error) });
     }
@@ -2573,7 +2566,6 @@ app.whenReady().then(() => {
       sendProgress("scan", 0, 0);
       const { folderIndex, items, skipped } = await scanEagleLibrary(libraryPath, (done, total) => sendProgress("scan", done, total));
       const imported = await importEagleLibraryItems(items, {
-        libraryName,
         importMode: mode,
         existingEagleIds,
         onProgress: (done, total, current) => sendProgress("copy", done, total, current, { reused: skipped.reused }),
