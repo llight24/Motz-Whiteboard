@@ -49,6 +49,8 @@ contextBridge.exposeInMainWorld("referenceBoard", {
     return () => ipcRenderer.removeListener("native-file-drag-ended", listener);
   },
   writeBoardClipboard: (payload) => ipcRenderer.sendSync("write-board-clipboard", payload),
+  writeBoardClipboardImage: (payload) => ipcRenderer.invoke("write-board-clipboard-image", payload),
+  writeBoardClipboardFile: (payload) => ipcRenderer.invoke("write-board-clipboard-file", payload),
   renameLibraryAsset: (sourcePath, nextTitle) => ipcRenderer.invoke("rename-library-asset", sourcePath, nextTitle),
   deleteLibraryFiles: (filePaths, libraryId) => ipcRenderer.invoke("delete-library-files", filePaths, libraryId),
   showItemInFolder: (filePath) => ipcRenderer.invoke("show-item-in-folder", filePath),

@@ -1375,26 +1375,23 @@ function resizeHandleFromTarget(target) {
   return resizeHandleNames.find((handle) => classList.contains(handle)) || "";
 }
 
-function getClipboardImageInput(clipboardData) {
+function getClipboardMediaInput(clipboardData) {
   const files = [];
   const seen = new Set();
 
-  Array.from(clipboardData?.files ?? []).forEach((file) => {
-    if (!isImageFileLike(file)) return;
+  const acceptFile = (file) => {
+    if (!file || (!isImageFileLike(file) && !isVideoFileLike(file))) return;
     const key = `${file.name}-${file.size}-${file.type}`;
     if (seen.has(key)) return;
     seen.add(key);
     files.push(file);
-  });
+  };
+
+  Array.from(clipboardData?.files ?? []).forEach(acceptFile);
 
   Array.from(clipboardData?.items ?? []).forEach((item) => {
-    if (item.kind !== "file" || !item.type?.startsWith("image/")) return;
-    const file = item.getAsFile?.();
-    if (!file || !isImageFileLike(file)) return;
-    const key = `${file.name}-${file.size}-${file.type}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    files.push(file);
+    if (item.kind !== "file" || !/^(image|video)\//.test(item.type || "")) return;
+    acceptFile(item.getAsFile?.());
   });
 
   const metadata = {
@@ -1826,20 +1823,315 @@ function normalizeBoardTextNodes(items, fontOptions = noteFontOptions) {
   return changed ? nextItems : items;
 }
 
-function writeBoardClipboard(event, items, assetById) {
+// 多选复制到系统剪贴板时，选区会合成为一张拼图：位置、留白与画布一致，
+// 视频只画封面帧（与画布中显示的首帧相同），文本节点直接绘制文字。
+const boardClipboardImagePadding = 8;
+const boardClipboardImageMaxDimension = 4096;
+const boardClipboardVideoFrameTime = 0.03;
+const boardClipboardVideoBackground = "#090b0a";
+const boardClipboardFallbackBackground = "#111312";
+let boardClipboardCompositeToken = 0;
+
+function boardClipboardSurfaceBackground(surface) {
+  if (!surface || typeof window.getComputedStyle !== "function") return boardClipboardFallbackBackground;
+  const color = window.getComputedStyle(surface).backgroundColor;
+  return !color || color === "transparent" || color === "rgba(0, 0, 0, 0)" ? boardClipboardFallbackBackground : color;
+}
+
+// 单选一张本地图片时直接复用原文件，保留源图的格式和分辨率。
+function boardClipboardImagePath(items, assetById) {
+  if (items.length !== 1) return "";
+  const asset = items[0]?.assetId ? assetById?.get(items[0].assetId) : null;
+  if (!asset || isAssetVideo(asset)) return "";
+  const path = getAssetCheckPath(asset);
+  return isCheckableLocalPath(path) ? path : "";
+}
+
+// 单选一段本地视频时复制出去的就是视频本身，而不是封面图。
+function boardClipboardVideoPath(items, assetById) {
+  if (items.length !== 1) return "";
+  const asset = items[0]?.assetId ? assetById?.get(items[0].assetId) : null;
+  if (!asset || !isAssetVideo(asset)) return "";
+  const path = getAssetCheckPath(asset);
+  return isCheckableLocalPath(path) ? path : "";
+}
+
+// 单选文本节点时复制出去的就是纯文本，白板负载仍放进自定义格式留给内部粘贴。
+function writeBoardPlainTextClipboard(event, serialized, text) {
+  if (!event?.clipboardData) return false;
+  try {
+    event.clipboardData.setData(boardClipboardMime, serialized);
+  } catch {
+    // 部分剪贴板后端只保留文本格式。
+  }
+  event.clipboardData.setData("text/plain", text);
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function noteFontFamilyValue(value) {
+  const text = String(value || "").trim() || defaultNoteFont;
+  return /(^|,)\s*(sans-serif|serif|monospace|cursive|fantasy|system-ui)\s*$/i.test(text) ? text : `${text}, sans-serif`;
+}
+
+// 与 textarea 的 white-space: pre-wrap + overflow-wrap: anywhere 对齐。
+function wrapNoteTextLines(text, fontSize, fontFamily, maxWidth) {
+  const lines = [];
+  String(text ?? "").split(/\r?\n/).forEach((paragraph) => {
+    let line = "";
+    (paragraph.match(/\s+|\S+/g) ?? []).forEach((token) => {
+      if (estimatedTextLineWidth(line + token, fontSize, fontFamily) <= maxWidth) {
+        line += token;
+        return;
+      }
+      if (line) {
+        lines.push(line);
+        line = "";
+      }
+      let rest = token;
+      while (rest.length > 1 && estimatedTextLineWidth(rest, fontSize, fontFamily) > maxWidth) {
+        let index = 1;
+        while (index < rest.length && estimatedTextLineWidth(rest.slice(0, index + 1), fontSize, fontFamily) <= maxWidth) index += 1;
+        lines.push(rest.slice(0, index));
+        rest = rest.slice(index);
+      }
+      line = rest;
+    });
+    lines.push(line);
+  });
+  return lines;
+}
+
+function drawBoardNote(ctx, item, rect, fontOptions) {
+  const fontSize = Number(item.fontSize) || 16;
+  const fontFamily = noteFontFamilyValue(noteFontValue(item, fontOptions));
+  ctx.font = `${fontSize}px ${fontFamily}`;
+  ctx.textBaseline = "top";
+  ctx.fillStyle = noteColorValue(item);
+  const inset = 2;
+  wrapNoteTextLines(item.text, fontSize, fontFamily, Math.max(1, rect.width - inset * 2)).forEach((line, index) => {
+    if (line) ctx.fillText(line, rect.x + inset, rect.y + inset + index * fontSize * textNodeLineHeight);
+  });
+}
+
+function drawContainedMedia(ctx, source, naturalWidth, naturalHeight, rect) {
+  if (!(naturalWidth > 0) || !(naturalHeight > 0) || !(rect.width > 0) || !(rect.height > 0)) return;
+  const scale = Math.min(rect.width / naturalWidth, rect.height / naturalHeight);
+  const width = naturalWidth * scale;
+  const height = naturalHeight * scale;
+  ctx.drawImage(source, rect.x + (rect.width - width) / 2, rect.y + (rect.height - height) / 2, width, height);
+}
+
+function waitForMediaEvent(target, eventNames, timeout) {
+  return new Promise((resolve) => {
+    const finish = (eventName) => {
+      window.clearTimeout(timer);
+      eventNames.forEach((name) => target.removeEventListener(name, onEvent));
+      resolve(eventName);
+    };
+    const onEvent = (event) => finish(event.type);
+    const timer = window.setTimeout(() => finish(""), timeout);
+    eventNames.forEach((name) => target.addEventListener(name, onEvent));
+  });
+}
+
+async function resolveBoardItemMediaUrl(asset) {
+  const requested = getAssetMediaUrl(asset);
+  if (!isCheckableLocalPath(requested) || typeof window.referenceBoard?.getMediaUrl !== "function") return requested;
+  try {
+    const url = await window.referenceBoard.getMediaUrl(requested);
+    return typeof url === "string" && url ? url : requested;
+  } catch {
+    return requested;
+  }
+}
+
+async function loadBoardItemImage(url) {
+  const image = new window.Image();
+  image.src = url;
+  try {
+    await image.decode();
+  } catch {
+    return null;
+  }
+  return image.naturalWidth > 0 && image.naturalHeight > 0 ? image : null;
+}
+
+async function loadBoardItemVideoCover(url) {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.preload = "auto";
+  video.playsInline = true;
+  let timer = 0;
+  const loaded = new Promise((resolve) => {
+    const finish = (ok) => {
+      window.clearTimeout(timer);
+      video.removeEventListener("loadeddata", onLoaded);
+      video.removeEventListener("error", onError);
+      resolve(ok);
+    };
+    const onLoaded = () => finish(true);
+    const onError = () => finish(false);
+    video.addEventListener("loadeddata", onLoaded);
+    video.addEventListener("error", onError);
+    timer = window.setTimeout(() => finish(false), 8000);
+  });
+  video.src = url;
+  if (!(await loaded) || video.readyState < 2) return null;
+  // 画布里的封面是首帧（revealVideoFirstFrame 会切到 0.03s），拼图保持一致。
+  if (Number(video.duration) > boardClipboardVideoFrameTime + 0.05) {
+    const seeked = waitForMediaEvent(video, ["seeked", "error"], 4000);
+    try {
+      video.currentTime = boardClipboardVideoFrameTime;
+    } catch {
+      // 不可跳转时直接用当前解码帧。
+    }
+    await seeked;
+  }
+  return video;
+}
+
+// 远程素材直接绘制会污染画布（toBlob 会抛 SecurityError），先取回 blob 再绘制。
+async function loadBoardItemDrawable(asset) {
+  const url = await resolveBoardItemMediaUrl(asset);
+  if (!url) return null;
+  const load = () => (isAssetVideo(asset) ? loadBoardItemVideoCover(url) : loadBoardItemImage(url));
+  if (!isHttpUrl(url)) {
+    const source = await load();
+    return source ? { source } : null;
+  }
+
+  try {
+    const response = await fetch(url);
+    const objectUrl = URL.createObjectURL(await response.blob());
+    const source = isAssetVideo(asset) ? await loadBoardItemVideoCover(objectUrl) : await loadBoardItemImage(objectUrl);
+    if (source) return { source, release: () => URL.revokeObjectURL(objectUrl) };
+    URL.revokeObjectURL(objectUrl);
+  } catch {
+    // 跨域取不回时跳过该素材，其余内容仍然成图。
+  }
+  return null;
+}
+
+function releaseBoardItemDrawable(drawable) {
+  drawable.release?.();
+  const source = drawable.source;
+  if (source instanceof HTMLVideoElement) {
+    source.pause?.();
+    source.removeAttribute("src");
+    source.load?.();
+  }
+}
+
+async function composeBoardSelectionImage(items, assetById, options) {
+  const minX = Math.min(...items.map((item) => Number(item.x) || 0));
+  const minY = Math.min(...items.map((item) => Number(item.y) || 0));
+  const maxX = Math.max(...items.map((item) => (Number(item.x) || 0) + (Number(item.width) || 0)));
+  const maxY = Math.max(...items.map((item) => (Number(item.y) || 0) + (Number(item.height) || 0)));
+  const width = maxX - minX + boardClipboardImagePadding * 2;
+  const height = maxY - minY + boardClipboardImagePadding * 2;
+  if (!(width > 0) || !(height > 0)) return null;
+
+  const deviceScale = clampNumber(Number(window.devicePixelRatio) || 1, 1, 2);
+  const scale = Math.min(deviceScale, boardClipboardImageMaxDimension / Math.max(width, height));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+
+  ctx.fillStyle = options.background;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const originX = minX - boardClipboardImagePadding;
+  const originY = minY - boardClipboardImagePadding;
+
+  for (const item of items) {
+    const rect = {
+      x: ((Number(item.x) || 0) - originX) * scale,
+      y: ((Number(item.y) || 0) - originY) * scale,
+      width: Math.max(0, (Number(item.width) || 0) * scale),
+      height: Math.max(0, (Number(item.height) || 0) * scale),
+    };
+    if (item.type === "note") {
+      drawBoardNote(ctx, item, rect, options.noteFonts);
+      continue;
+    }
+
+    const asset = item.assetId ? assetById?.get(item.assetId) : null;
+    if (!asset) continue;
+    if (isAssetVideo(asset)) {
+      ctx.fillStyle = boardClipboardVideoBackground;
+      ctx.fillRect(rect.x, rect.y, rect.width, rect.height);
+    }
+
+    const drawable = await loadBoardItemDrawable(asset);
+    if (!drawable) continue;
+    const source = drawable.source;
+    drawContainedMedia(ctx, source, source.videoWidth ?? source.naturalWidth, source.videoHeight ?? source.naturalHeight, rect);
+    releaseBoardItemDrawable(drawable);
+  }
+
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+}
+
+async function writeBoardFileClipboard({ filePath, serialized, token }) {
+  if (typeof window.referenceBoard?.writeBoardClipboardFile !== "function") return;
+  if (token !== boardClipboardCompositeToken) return;
+  try {
+    await window.referenceBoard.writeBoardClipboardFile({ filePath, serialized });
+  } catch {
+    // 文件写不进剪贴板时保留已写入的文本负载。
+  }
+}
+
+async function writeBoardSelectionImage({ items, assetById, options, serialized, token }) {
+  if (typeof window.referenceBoard?.writeBoardClipboardImage !== "function") return;
+  let blob = null;
+  try {
+    blob = await composeBoardSelectionImage(items, assetById, options);
+  } catch {
+    blob = null;
+  }
+  if (!blob?.size || token !== boardClipboardCompositeToken) return;
+
+  try {
+    await window.referenceBoard.writeBoardClipboardImage({ serialized, imageBytes: new Uint8Array(await blob.arrayBuffer()) });
+  } catch {
+    // 拼图写入失败时保留已有的文本负载，白板内部粘贴仍然可用。
+  }
+}
+
+function writeBoardClipboard(event, items, assetById, options = {}) {
   if (!event || items.length === 0) return false;
   const serialized = JSON.stringify({ version: 1, items });
-  const imageItem = items.find((item) => {
-    const asset = item?.assetId ? assetById?.get(item.assetId) : null;
-    return asset && !isAssetVideo(asset) && isCheckableLocalPath(getAssetCheckPath(asset));
-  });
-  const imagePath = imageItem ? getAssetCheckPath(assetById.get(imageItem.assetId)) : "";
+  // 单选文本：复制出去的是纯文本；单选图片/视频：出去的就是原图/原视频；多选：合成拼图。
+  if (items.length === 1 && items[0]?.type === "note" && writeBoardPlainTextClipboard(event, serialized, String(items[0].text ?? ""))) {
+    return true;
+  }
+  const imagePath = boardClipboardImagePath(items, assetById);
+  const filePath = imagePath ? "" : boardClipboardVideoPath(items, assetById);
+  const token = (boardClipboardCompositeToken += 1);
 
   if (window.referenceBoard?.writeBoardClipboard) {
     const written = window.referenceBoard.writeBoardClipboard({ serialized, imagePath });
     if (written) {
       event.preventDefault();
       event.stopPropagation();
+      if (filePath) {
+        void writeBoardFileClipboard({ filePath, serialized, token });
+      } else if (!imagePath) {
+        void writeBoardSelectionImage({
+          items,
+          assetById,
+          serialized,
+          token,
+          options: {
+            background: boardClipboardSurfaceBackground(options.surface),
+            noteFonts: options.noteFonts?.length ? options.noteFonts : noteFontOptions,
+          },
+        });
+      }
       return true;
     }
   }
@@ -2679,7 +2971,7 @@ function Workspace({
   useEffect(() => {
     const handleGlobalPaste = (event) => {
       if (isTextEditingTarget(event.target) || event.target?.closest?.(".canvas-frame")) return;
-      const input = getClipboardImageInput(event.clipboardData);
+      const input = getClipboardMediaInput(event.clipboardData);
       if (!input.hasContent) return;
       event.preventDefault();
       importImagesToLibrary(input.files, input.metadata, { messagePrefix: "已粘贴到素材库" });
@@ -4890,7 +5182,7 @@ function Workspace({
 
   async function handleAssetPanelPaste(event) {
     if (isTextEditingTarget(event.target)) return;
-    const input = getClipboardImageInput(event.clipboardData);
+    const input = getClipboardMediaInput(event.clipboardData);
     if (!input.hasContent) return;
     event.preventDefault();
     event.stopPropagation();
@@ -6990,6 +7282,17 @@ function Canvas({
     };
   }
 
+  function canvasClientPointFromBoard(point) {
+    const frameRect = frameRef.current?.getBoundingClientRect();
+    if (!frameRect) return { x: 0, y: 0 };
+    const currentOffset = viewportOffsetRef.current;
+    const currentZoom = zoomRef.current;
+    return {
+      x: frameRect.left + currentOffset.x + point.x * currentZoom,
+      y: frameRect.top + currentOffset.y + point.y * currentZoom,
+    };
+  }
+
   function closeCanvasPreview() {
     setCanvasPreviewAssetId("");
     frameRef.current?.focus?.({ preventScroll: true });
@@ -7094,7 +7397,7 @@ function Canvas({
   function handleCanvasCopy(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedBoardItemIds.size === 0) return;
     const copiedItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
-    if (writeBoardClipboard(event, copiedItems, assetById)) {
+    if (writeBoardClipboard(event, copiedItems, assetById, { surface: frameRef.current, noteFonts: availableNoteFonts })) {
       clipboardPasteGenerationRef.current = 0;
     }
   }
@@ -7102,7 +7405,7 @@ function Canvas({
   function handleCanvasCut(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedBoardItemIds.size === 0) return;
     const copiedItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
-    if (!writeBoardClipboard(event, copiedItems, assetById)) return;
+    if (!writeBoardClipboard(event, copiedItems, assetById, { surface: frameRef.current, noteFonts: availableNoteFonts })) return;
     deleteBoardItems(selectedBoardItemIds);
     setSelectedBoardItemIds(new Set());
     setSelectedBoardItemId("");
@@ -7119,11 +7422,19 @@ function Canvas({
       duplicateCanvasClipboardItems(copiedItems);
       return;
     }
-    const input = getClipboardImageInput(event.clipboardData);
+    const input = getClipboardMediaInput(event.clipboardData);
     if (input.hasContent) {
       event.preventDefault();
       event.stopPropagation();
-      pasteImagesToBoard?.(input.files, input.metadata, clipboardPasteAnchorRef.current ?? visibleCanvasCenterPoint());
+      const anchor = clipboardPasteAnchorRef.current ?? visibleCanvasCenterPoint();
+      // 剪贴板里是本库已有文件（例如刚复制的素材）时直接复用，不再导入一份副本。
+      const existingAssetIds = assetIdsFromDroppedFiles(input.files, assets);
+      if (existingAssetIds.length > 0) {
+        const clientPoint = canvasClientPointFromBoard(anchor);
+        void addDroppedAssetsToCanvas(existingAssetIds, clientPoint.x, clientPoint.y);
+        return;
+      }
+      pasteImagesToBoard?.(input.files, input.metadata, anchor);
       return;
     }
 
@@ -7956,6 +8267,13 @@ function FloatingBoard({
     };
   }
 
+  function floatingClientPointFromBoard(point) {
+    return {
+      x: viewportOffset.x + point.x * zoom,
+      y: viewportOffset.y + point.y * zoom,
+    };
+  }
+
   function addFloatingText(position = {}, initialText = "") {
     if (!board.id) return;
     const text = String(initialText || "").slice(0, 20000);
@@ -8157,7 +8475,7 @@ function FloatingBoard({
   function handleFloatingCopy(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedFloatingIds.size === 0) return;
     const copiedItems = items.filter((item) => selectedFloatingIds.has(item.id));
-    if (writeBoardClipboard(event, copiedItems, assetById)) {
+    if (writeBoardClipboard(event, copiedItems, assetById, { surface: floatingShellRef.current, noteFonts: availableNoteFonts })) {
       clipboardPasteGenerationRef.current = 0;
     }
   }
@@ -8165,7 +8483,7 @@ function FloatingBoard({
   function handleFloatingCut(event) {
     if ((editingNoteId && isTextEditingTarget(event.target)) || selectedFloatingIds.size === 0) return;
     const copiedItems = items.filter((item) => selectedFloatingIds.has(item.id));
-    if (!writeBoardClipboard(event, copiedItems, assetById)) return;
+    if (!writeBoardClipboard(event, copiedItems, assetById, { surface: floatingShellRef.current, noteFonts: availableNoteFonts })) return;
     deleteFloatingItems(selectedFloatingIds);
     setEditingNoteId("");
     clipboardPasteGenerationRef.current = 0;
@@ -8273,10 +8591,19 @@ function FloatingBoard({
       duplicateFloatingClipboardItems(copiedItems);
       return;
     }
-    const input = getClipboardImageInput(event.clipboardData);
+    const input = getClipboardMediaInput(event.clipboardData);
     if (input.hasContent) {
       event.preventDefault();
       event.stopPropagation();
+      // 剪贴板里是本库已有文件（例如刚复制的素材）时直接复用，不再导入一份副本。
+      const existingAssetIds = assetIdsFromDroppedFiles(input.files, assets);
+      if (existingAssetIds.length > 0) {
+        const clientPoint = clipboardPasteAnchorRef.current
+          ? floatingClientPointFromBoard(clipboardPasteAnchorRef.current)
+          : floatingCenterPoint();
+        void addDroppedAssetsToFloating(existingAssetIds, clientPoint.x, clientPoint.y);
+        return;
+      }
       pasteImagesToFloating(input.files, input.metadata);
       return;
     }
@@ -8288,6 +8615,28 @@ function FloatingBoard({
     const center = floatingCenterPoint();
     addFloatingText(clipboardPasteAnchorRef.current ?? floatingPointFromClient(center.x, center.y), text);
   }
+
+  // 原生剪贴板事件落在 body 上，不会冒泡到浮窗根节点，必须像主画布一样挂在 window 上。
+  useEffect(() => {
+    const copy = (event) => {
+      if (!event.defaultPrevented) handleFloatingCopy(event);
+    };
+    const cut = (event) => {
+      if (!event.defaultPrevented) handleFloatingCut(event);
+    };
+    const paste = (event) => {
+      if (!event.defaultPrevented) handleFloatingPaste(event);
+    };
+
+    window.addEventListener("copy", copy, true);
+    window.addEventListener("cut", cut, true);
+    window.addEventListener("paste", paste, true);
+    return () => {
+      window.removeEventListener("copy", copy, true);
+      window.removeEventListener("cut", cut, true);
+      window.removeEventListener("paste", paste, true);
+    };
+  }, [board.id, editingNoteId, items, selectedFloatingIds]);
 
   function startWindowDragCandidate(event) {
     if (event.button !== 0) return;
@@ -8750,9 +9099,6 @@ function FloatingBoard({
       onPointerMove={handlePointerMove}
       onPointerLeave={() => scheduleHideFloatingControls(520)}
       onPointerDown={handleFloatingPointerDown}
-      onCopy={handleFloatingCopy}
-      onCut={handleFloatingCut}
-      onPaste={handleFloatingPaste}
       onPointerUp={stopWindowDrag}
       onWheel={handleFloatingWheel}
       onAuxClick={(event) => event.preventDefault()}
