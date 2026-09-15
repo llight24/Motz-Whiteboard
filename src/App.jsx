@@ -2022,6 +2022,44 @@ function boundsFromItems(items) {
   return { left, top, right, bottom };
 }
 
+const floatingNudgeStep = 5;
+
+// W/A/S/D 与方向键：W 上对齐、A 左对齐、S 下对齐、D 右对齐。
+const floatingArrangementKeys = {
+  w: "top",
+  arrowup: "top",
+  a: "left",
+  arrowleft: "left",
+  s: "bottom",
+  arrowdown: "bottom",
+  d: "right",
+  arrowright: "right",
+};
+
+// 浮窗画布专用：选中多个素材时把同类边对齐到选区外框，只选中一个时按 5px 步进移动。
+function floatingKeyboardPositions(items, selectedIds, anchor) {
+  const targets = items.filter((item) => selectedIds.has(item.id));
+  if (targets.length === 0) return null;
+
+  if (targets.length === 1) {
+    const item = targets[0];
+    const x = item.x + (anchor === "left" ? -floatingNudgeStep : anchor === "right" ? floatingNudgeStep : 0);
+    const y = item.y + (anchor === "top" ? -floatingNudgeStep : anchor === "bottom" ? floatingNudgeStep : 0);
+    return { [item.id]: { x, y } };
+  }
+
+  const bounds = boundsFromItems(targets);
+  const positions = {};
+  let moved = false;
+  targets.forEach((item) => {
+    const x = anchor === "left" ? bounds.left : anchor === "right" ? bounds.right - item.width : item.x;
+    const y = anchor === "top" ? bounds.top : anchor === "bottom" ? bounds.bottom - item.height : item.y;
+    if (x !== item.x || y !== item.y) moved = true;
+    positions[item.id] = { x, y };
+  });
+  return moved ? positions : null;
+}
+
 function nearestSnapDelta(movingEdges, targetEdges, threshold) {
   return movingEdges.reduce(
     (best, edge) => {
@@ -7611,6 +7649,31 @@ function FloatingBoard({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [selectedFloatingIds]);
+
+  useEffect(() => {
+    if (selectedFloatingIds.size === 0) return undefined;
+
+    const handleArrangementKeyDown = (event) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isTextEditingTarget(event.target) || floatingPreviewAssetId) return;
+      const anchor = floatingArrangementKeys[event.key.toLowerCase()];
+      if (!anchor) return;
+      const positions = floatingKeyboardPositions(items, selectedFloatingIds, anchor);
+      if (!positions) return;
+      event.preventDefault();
+      event.stopPropagation();
+      // 长按自动重复时合并为一次撤销步。
+      if (!event.repeat) checkpointBoardItems(board.id);
+      setBoardItems((current) => ({
+        ...current,
+        [board.id]: (current[board.id] ?? []).map((item) => (positions[item.id] ? { ...item, ...positions[item.id] } : item)),
+      }));
+      setContextMenu(null);
+    };
+
+    window.addEventListener("keydown", handleArrangementKeyDown);
+    return () => window.removeEventListener("keydown", handleArrangementKeyDown);
+  }, [board.id, checkpointBoardItems, floatingPreviewAssetId, items, selectedFloatingIds, setBoardItems]);
 
   useEffect(() => {
     const handleHistoryKeyDown = (event) => {
