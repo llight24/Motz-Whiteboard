@@ -2049,14 +2049,35 @@ function keyboardArrangementPositions(items, selectedIds, anchor) {
   }
 
   const bounds = boundsFromItems(targets);
+  const right = anchor === "right";
+  const bottom = anchor === "bottom";
+  const horizontal = anchor === "left" || right;
+  // 锚点取画布位置上最靠对齐边的素材（右对齐即最右侧），其余素材按到该边的距离依次向内侧让位，与选中先后无关。
+  const edgeKey = (item) => (right ? -(item.x + item.width) : anchor === "left" ? item.x : bottom ? -(item.y + item.height) : item.y);
+  const crossKey = (item) => (horizontal ? item.y : item.x);
+  const ordered = [...targets].sort((a, b) => edgeKey(a) - edgeKey(b) || crossKey(a) - crossKey(b) || String(a.id).localeCompare(String(b.id)));
+  const placed = [];
   const positions = {};
   let moved = false;
-  targets.forEach((item) => {
-    const x = anchor === "left" ? bounds.left : anchor === "right" ? bounds.right - item.width : item.x;
-    const y = anchor === "top" ? bounds.top : anchor === "bottom" ? bounds.bottom - item.height : item.y;
+
+  ordered.forEach((item) => {
+    let x = anchor === "left" ? bounds.left : right ? bounds.right - item.width : item.x;
+    let y = anchor === "top" ? bounds.top : bottom ? bounds.bottom - item.height : item.y;
+
+    for (let guard = 0; guard <= placed.length; guard += 1) {
+      const conflicts = placed.filter((rect) => x < rect.right && x + item.width > rect.left && y < rect.bottom && y + item.height > rect.top);
+      if (conflicts.length === 0) break;
+      if (right) x = Math.min(...conflicts.map((rect) => rect.left)) - item.width - keyboardNudgeStep;
+      else if (anchor === "left") x = Math.max(...conflicts.map((rect) => rect.right)) + keyboardNudgeStep;
+      else if (bottom) y = Math.min(...conflicts.map((rect) => rect.top)) - item.height - keyboardNudgeStep;
+      else y = Math.max(...conflicts.map((rect) => rect.bottom)) + keyboardNudgeStep;
+    }
+
     if (x !== item.x || y !== item.y) moved = true;
     positions[item.id] = { x, y };
+    placed.push({ left: x, right: x + item.width, top: y, bottom: y + item.height });
   });
+
   return moved ? positions : null;
 }
 
@@ -6273,6 +6294,7 @@ function Canvas({
   const [contextMenu, setContextMenu] = useState(null);
   const [selectedBoardItemIds, setSelectedBoardItemIds] = useState(() => new Set());
   const [selectionBox, setSelectionBox] = useState(null);
+  const [canvasPreviewAssetId, setCanvasPreviewAssetId] = useState("");
   const [resizeState, setResizeState] = useState(null);
   const [editingNoteId, setEditingNoteId] = useState("");
   const [zoom, setCanvasZoom] = useState(workspaceZoom);
@@ -6280,6 +6302,7 @@ function Canvas({
   const contextMenuItem = contextMenu?.itemId ? activeItems.find((item) => item.id === contextMenu.itemId) : null;
   const contextMenuIsNote = contextMenuItem?.type === "note";
   const selectedCanvasItems = activeItems.filter((item) => selectedBoardItemIds.has(item.id));
+  const canvasPreviewAsset = assetById.get(canvasPreviewAssetId);
   const groupSelectionBox = selectedCanvasItems.length > 1 ? createResizeSnapshot(selectedCanvasItems)?.box : null;
   const frameRef = useRef(null);
   const surfaceRef = useRef(null);
@@ -6510,7 +6533,7 @@ function Canvas({
 
     const handleKeyDown = (event) => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
-      if (isTextEditingTarget(event.target)) return;
+      if (isTextEditingTarget(event.target) || canvasPreviewAssetId) return;
       event.preventDefault();
       deleteBoardItems(selectedBoardItemIds);
       setSelectedBoardItemIds(new Set());
@@ -6520,14 +6543,14 @@ function Canvas({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteBoardItems, selectedBoardItemIds, setSelectedBoardItemId]);
+  }, [canvasPreviewAssetId, deleteBoardItems, selectedBoardItemIds, setSelectedBoardItemId]);
 
   useEffect(() => {
     if (selectedBoardItemIds.size === 0) return undefined;
 
     const handleArrangementKeyDown = (event) => {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
-      if (isTextEditingTarget(event.target)) return;
+      if (isTextEditingTarget(event.target) || canvasPreviewAssetId) return;
       const anchor = keyboardArrangementKeys[event.key.toLowerCase()];
       if (!anchor) return;
       // 焦点在画布内才响应，避免在素材库等其它区域按键时波及白板选区。
@@ -6550,7 +6573,33 @@ function Canvas({
 
     window.addEventListener("keydown", handleArrangementKeyDown);
     return () => window.removeEventListener("keydown", handleArrangementKeyDown);
-  }, [activeBoardId, activeItems, checkpointBoardItems, selectedBoardItemIds, setBoardItems]);
+  }, [activeBoardId, activeItems, canvasPreviewAssetId, checkpointBoardItems, selectedBoardItemIds, setBoardItems]);
+
+  useEffect(() => {
+    const handleCanvasPreviewKeyDown = (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey || isTextEditingTarget(event.target)) return;
+      if (canvasPreviewAssetId) {
+        if (event.code !== "Space" && event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        setCanvasPreviewAssetId("");
+        return;
+      }
+      if (event.code !== "Space") return;
+      // 焦点在画布内才响应，避免和素材库的空格预览互相顶掉。
+      const frame = frameRef.current;
+      const activeElement = document.activeElement;
+      if (!frame || (activeElement !== frame && !frame.contains(activeElement))) return;
+      const targetAsset = selectedCanvasItems.map((item) => assetById.get(item.assetId)).find(Boolean);
+      if (!targetAsset) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      setCanvasPreviewAssetId(targetAsset.id);
+    };
+
+    window.addEventListener("keydown", handleCanvasPreviewKeyDown);
+    return () => window.removeEventListener("keydown", handleCanvasPreviewKeyDown);
+  }, [assetById, canvasPreviewAssetId, selectedCanvasItems]);
 
   useEffect(() => {
     const handleHistoryKeyDown = (event) => {
@@ -7467,6 +7516,40 @@ function Canvas({
           )}
         </div>
       ) : null}
+      {canvasPreviewAsset ? (
+        <div className="image-preview-backdrop" role="dialog" aria-modal="true" onMouseDown={() => setCanvasPreviewAssetId("")}>
+          <section className="image-preview-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="image-preview-topbar">
+              <div>
+                <strong>{canvasPreviewAsset.title}</strong>
+                <span>{canvasPreviewAsset.dimensions || canvasPreviewAsset.size} · 空格关闭</span>
+              </div>
+              <button type="button" onClick={() => setCanvasPreviewAssetId("")} aria-label="关闭预览" title="关闭预览">
+                <X size={17} />
+              </button>
+            </div>
+            <div className={classNames("image-preview-stage", isAssetVideo(canvasPreviewAsset) && "is-video")}>
+              <div
+                className="image-preview-viewport"
+                style={
+                  isAssetVideo(canvasPreviewAsset)
+                    ? undefined
+                    : { width: "calc(100% - 48px)", height: "calc(100% - 32px)", transform: "translate3d(-50%, -50%, 0)" }
+                }
+              >
+                {isAssetVideo(canvasPreviewAsset) ? (
+                  <div className="image-preview-video-frame">
+                    <InlineVideoMedia asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} preload="auto" />
+                  </div>
+                ) : (
+                  <MediaElement asset={canvasPreviewAsset} alt={canvasPreviewAsset.title} />
+                )}
+              </div>
+            </div>
+            <div className="image-preview-strip" />
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -7723,14 +7806,14 @@ function FloatingBoard({
 
     const handleKeyDown = (event) => {
       if (event.key !== "Delete" && event.key !== "Backspace") return;
-      if (isTextEditingTarget(event.target)) return;
+      if (isTextEditingTarget(event.target) || floatingPreviewAssetId) return;
       event.preventDefault();
       deleteFloatingItems(selectedFloatingIds);
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedFloatingIds]);
+  }, [floatingPreviewAssetId, selectedFloatingIds]);
 
   useEffect(() => {
     if (selectedFloatingIds.size === 0) return undefined;
