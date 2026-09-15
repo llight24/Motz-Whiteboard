@@ -2022,10 +2022,10 @@ function boundsFromItems(items) {
   return { left, top, right, bottom };
 }
 
-const floatingNudgeStep = 5;
+const keyboardNudgeStep = 5;
 
 // W/A/S/D 与方向键：W 上对齐、A 左对齐、S 下对齐、D 右对齐。
-const floatingArrangementKeys = {
+const keyboardArrangementKeys = {
   w: "top",
   arrowup: "top",
   a: "left",
@@ -2036,15 +2036,15 @@ const floatingArrangementKeys = {
   arrowright: "right",
 };
 
-// 浮窗画布专用：选中多个素材时把同类边对齐到选区外框，只选中一个时按 5px 步进移动。
-function floatingKeyboardPositions(items, selectedIds, anchor) {
+// 画布与浮窗画布共用：选中多个素材时把同类边对齐到选区外框，只选中一个时按 5px 步进移动。
+function keyboardArrangementPositions(items, selectedIds, anchor) {
   const targets = items.filter((item) => selectedIds.has(item.id));
   if (targets.length === 0) return null;
 
   if (targets.length === 1) {
     const item = targets[0];
-    const x = item.x + (anchor === "left" ? -floatingNudgeStep : anchor === "right" ? floatingNudgeStep : 0);
-    const y = item.y + (anchor === "top" ? -floatingNudgeStep : anchor === "bottom" ? floatingNudgeStep : 0);
+    const x = item.x + (anchor === "left" ? -keyboardNudgeStep : anchor === "right" ? keyboardNudgeStep : 0);
+    const y = item.y + (anchor === "top" ? -keyboardNudgeStep : anchor === "bottom" ? keyboardNudgeStep : 0);
     return { [item.id]: { x, y } };
   }
 
@@ -6523,6 +6523,36 @@ function Canvas({
   }, [deleteBoardItems, selectedBoardItemIds, setSelectedBoardItemId]);
 
   useEffect(() => {
+    if (selectedBoardItemIds.size === 0) return undefined;
+
+    const handleArrangementKeyDown = (event) => {
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+      if (isTextEditingTarget(event.target)) return;
+      const anchor = keyboardArrangementKeys[event.key.toLowerCase()];
+      if (!anchor) return;
+      // 焦点在画布内才响应，避免在素材库等其它区域按键时波及白板选区。
+      const frame = frameRef.current;
+      const activeElement = document.activeElement;
+      if (!frame || (activeElement !== frame && !frame.contains(activeElement))) return;
+      if (document.querySelector(".dialog-backdrop")) return;
+      const positions = keyboardArrangementPositions(activeItems, selectedBoardItemIds, anchor);
+      if (!positions) return;
+      event.preventDefault();
+      event.stopPropagation();
+      // 长按自动重复时合并为一次撤销步。
+      if (!event.repeat) checkpointBoardItems(activeBoardId);
+      setBoardItems((current) => ({
+        ...current,
+        [activeBoardId]: (current[activeBoardId] ?? []).map((item) => (positions[item.id] ? { ...item, ...positions[item.id] } : item)),
+      }));
+      setContextMenu(null);
+    };
+
+    window.addEventListener("keydown", handleArrangementKeyDown);
+    return () => window.removeEventListener("keydown", handleArrangementKeyDown);
+  }, [activeBoardId, activeItems, checkpointBoardItems, selectedBoardItemIds, setBoardItems]);
+
+  useEffect(() => {
     const handleHistoryKeyDown = (event) => {
       if (event.defaultPrevented || isTextEditingTarget(event.target)) return;
       if (!event.ctrlKey && !event.metaKey) return;
@@ -6691,6 +6721,8 @@ function Canvas({
     setContextMenu(null);
     const startX = event.clientX;
     const startY = event.clientY;
+    const baseSelection = new Set(selectedBoardItemIds);
+    const liveModifiers = { shiftKey: event.shiftKey, ctrlKey: event.ctrlKey || event.metaKey };
     let selecting = false;
 
     const applySelection = (clientX, clientY) => {
@@ -6703,7 +6735,7 @@ function Canvas({
       const bottom = Math.max(startY, clientY);
       setSelectionBox({ left, top, width: right - left, height: bottom - top });
 
-      const nextSelectedIds = activeItems
+      const hitIds = activeItems
         .filter((item) => {
           const itemLeft = frameRect.left + viewportOffset.x + item.x * zoom;
           const itemTop = frameRect.top + viewportOffset.y + item.y * zoom;
@@ -6713,11 +6745,20 @@ function Canvas({
         })
         .map((item) => item.id);
 
-      setSelectedBoardItemIds(new Set(nextSelectedIds));
-      setSelectedBoardItemId(nextSelectedIds[0] ?? "");
+      const mode = selectionModifierFromEvent(liveModifiers);
+      const nextSelectedIds = combineSelection(baseSelection, hitIds, mode);
+      setSelectedBoardItemIds(nextSelectedIds);
+      if (mode === "replace") {
+        setSelectedBoardItemId(hitIds[0] ?? "");
+      } else {
+        // 焦点素材被减选掉时同步清空，否则它仍会显示为选中。
+        setSelectedBoardItemId((current) => (current && !nextSelectedIds.has(current) ? "" : current));
+      }
     };
 
     const move = (moveEvent) => {
+      liveModifiers.shiftKey = moveEvent.shiftKey;
+      liveModifiers.ctrlKey = moveEvent.ctrlKey || moveEvent.metaKey;
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
       if (!selecting && Math.hypot(dx, dy) > 5) {
@@ -6733,7 +6774,7 @@ function Canvas({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
       window.removeEventListener("mouseup", stop);
-      if (!selecting) {
+      if (!selecting && selectionModifierFromEvent(liveModifiers) === "replace") {
         setSelectedBoardItemIds(new Set());
         setSelectedBoardItemId("");
       }
@@ -6759,9 +6800,40 @@ function Canvas({
     clipboardPasteAnchorRef.current = canvasPointFromClient(event.clientX, event.clientY);
   }
 
+  function applyCanvasSelectionModifier(modifier, itemId) {
+    setSelectedBoardItemIds((current) => {
+      const next = new Set(current);
+      if (modifier === "add") next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+    // 减选后焦点不能停在已取消选中的素材上，否则它仍会显示为选中。
+    setSelectedBoardItemId((current) => (modifier === "add" ? itemId : current === itemId ? "" : current));
+  }
+
+  // 整组选框会盖住组内素材，修饰键点选需要按坐标命中最上层素材。
+  function canvasItemAtClientPoint(clientX, clientY) {
+    const point = canvasPointFromClient(clientX, clientY);
+    for (let index = activeItems.length - 1; index >= 0; index -= 1) {
+      const item = activeItems[index];
+      if (point.x >= item.x && point.x <= item.x + item.width && point.y >= item.y && point.y <= item.y + item.height) return item;
+    }
+    return null;
+  }
+
   function startCanvasItemDrag(event, item) {
     if (editingNoteId === item.id) return;
     frameRef.current?.focus?.({ preventScroll: true });
+    const modifier = selectionModifierFromEvent(event);
+    if (event.button === 0 && modifier !== "replace") {
+      setContextMenu(null);
+      applyCanvasSelectionModifier(modifier, item.id);
+      return;
+    }
+    beginCanvasItemDrag(event, item);
+  }
+
+  function beginCanvasItemDrag(event, item) {
     setEditingNoteId("");
     if (event.button === 0 && item.assetId) {
       setBoardItems((current) => {
@@ -6779,7 +6851,17 @@ function Canvas({
 
   function startCanvasGroupDrag(event) {
     if (event.button !== 0 || selectedCanvasItems.length < 2) return;
-    startCanvasItemDrag(event, selectedCanvasItems[0]);
+    // 按住 Shift / Ctrl 时只调整选区：点到组内素材按素材加选/减选，空白处让位给框选。
+    const modifier = selectionModifierFromEvent(event);
+    if (modifier !== "replace") {
+      const hitItem = canvasItemAtClientPoint(event.clientX, event.clientY);
+      if (hitItem) {
+        setContextMenu(null);
+        applyCanvasSelectionModifier(modifier, hitItem.id);
+      }
+      return;
+    }
+    beginCanvasItemDrag(event, selectedCanvasItems[0]);
   }
 
   function startCanvasResize(event, item, handle = "se") {
@@ -7656,9 +7738,9 @@ function FloatingBoard({
     const handleArrangementKeyDown = (event) => {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
       if (isTextEditingTarget(event.target) || floatingPreviewAssetId) return;
-      const anchor = floatingArrangementKeys[event.key.toLowerCase()];
+      const anchor = keyboardArrangementKeys[event.key.toLowerCase()];
       if (!anchor) return;
-      const positions = floatingKeyboardPositions(items, selectedFloatingIds, anchor);
+      const positions = keyboardArrangementPositions(items, selectedFloatingIds, anchor);
       if (!positions) return;
       event.preventDefault();
       event.stopPropagation();
