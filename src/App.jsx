@@ -1698,6 +1698,24 @@ function clampNumber(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
 
+// Shift 加选、Ctrl/Cmd 减选，无修饰键时替换整个选区。
+function selectionModifierFromEvent(event) {
+  if (!event) return "replace";
+  if (event.shiftKey) return "add";
+  if (event.ctrlKey || event.metaKey) return "remove";
+  return "replace";
+}
+
+function combineSelection(baseIds, hitIds, mode) {
+  if (mode === "add") return new Set([...baseIds, ...hitIds]);
+  if (mode === "remove") {
+    const next = new Set(baseIds);
+    hitIds.forEach((id) => next.delete(id));
+    return next;
+  }
+  return new Set(hitIds);
+}
+
 function createPointerMoveScheduler(callback) {
   let frame = 0;
   let latestPoint = null;
@@ -3870,12 +3888,16 @@ function Workspace({
   }
 
   function handleAssetCardClick(event, asset) {
-    if (event.shiftKey) {
-      selectAssetRange(asset.id, event.ctrlKey || event.metaKey);
+    const modifier = selectionModifierFromEvent(event);
+    if (modifier === "add") {
+      selectAssetRange(asset.id, true);
       return;
     }
-    if (multiSelectMode || event.ctrlKey || event.metaKey) {
-      setMultiSelectMode(true);
+    if (modifier === "remove") {
+      if (selectedAssetIds.has(asset.id)) toggleAssetSelection(asset.id);
+      return;
+    }
+    if (multiSelectMode) {
       toggleAssetSelection(asset.id);
       return;
     }
@@ -3906,6 +3928,7 @@ function Workspace({
     if (event.button !== 0) return;
     if (event.target.closest?.(".asset-card, .panel-header, .color-filter-bar, button, input, label, select, textarea")) return;
     setAssetMenu(null);
+    if (selectionModifierFromEvent(event) !== "replace") return;
     exitAssetMultiSelection();
   }
 
@@ -3935,6 +3958,7 @@ function Workspace({
     let currentClientX = startX;
     let currentClientY = startY;
     let autoScrollFrame = 0;
+    const liveModifiers = { shiftKey: event.shiftKey, ctrlKey: event.ctrlKey || event.metaKey };
 
     setAssetMenu(null);
 
@@ -3961,22 +3985,26 @@ function Workspace({
         height: Math.max(0, clippedBottom - clippedTop),
       });
 
-      const nextIds = event.ctrlKey || event.metaKey ? new Set(baseSelection) : new Set();
+      const mode = selectionModifierFromEvent(liveModifiers);
+      const hitIds = [];
       cardRects.forEach((card) => {
         const cardLeft = card.left;
         const cardTop = card.top;
         const cardRight = cardLeft + card.width;
         const cardBottom = cardTop + card.height;
         const intersects = cardLeft < right && cardRight > left && cardTop < bottom && cardBottom > top;
-        if (intersects) nextIds.add(card.id);
+        if (intersects) hitIds.push(card.id);
       });
+      const nextIds = combineSelection(baseSelection, hitIds, mode);
 
       setSelectedAssetIds(nextIds);
-      const firstId = Array.from(nextIds)[0] ?? "";
-      if (firstId) {
-        setSelectedAssetId(firstId);
-        setSelectedBoardItemId("");
-        setAssetRangeAnchorId(firstId);
+      if (mode === "replace") {
+        const firstId = Array.from(nextIds)[0] ?? "";
+        if (firstId) {
+          setSelectedAssetId(firstId);
+          setSelectedBoardItemId("");
+          setAssetRangeAnchorId(firstId);
+        }
       }
     };
     const scheduledSelection = createPointerMoveScheduler(applySelection);
@@ -4010,6 +4038,8 @@ function Workspace({
     const move = (moveEvent) => {
       currentClientX = moveEvent.clientX;
       currentClientY = moveEvent.clientY;
+      liveModifiers.shiftKey = moveEvent.shiftKey;
+      liveModifiers.ctrlKey = moveEvent.ctrlKey || moveEvent.metaKey;
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
       if (!selecting && Math.hypot(dx, dy) > 4) {
@@ -4029,7 +4059,7 @@ function Workspace({
       window.cancelAnimationFrame(autoScrollFrame);
       if (selecting) scheduledSelection.flush();
       else scheduledSelection.cancel();
-      if (!selecting) {
+      if (!selecting && selectionModifierFromEvent(liveModifiers) === "replace") {
         exitAssetMultiSelection();
       }
       setAssetSelectionBox(null);
@@ -8003,6 +8033,15 @@ function FloatingBoard({
     let draggingWindow = false;
     const startX = event.clientX;
     const startY = event.clientY;
+    const baseSelection = new Set(selectedFloatingIds);
+    // 标题栏、边缘热区和操作按钮保持原有拖动行为，修饰键只在画布空白处生效。
+    const onWindowChrome = Boolean(event.target.closest?.(".floating-grip, .floating-hotzone, .floating-actions"));
+    const liveModifiers = {
+      shiftKey: onWindowChrome ? false : event.shiftKey,
+      ctrlKey: onWindowChrome ? false : event.ctrlKey,
+      metaKey: onWindowChrome ? false : event.metaKey,
+    };
+    const startsModified = selectionModifierFromEvent(liveModifiers) !== "replace";
 
     const applySelection = (clientX, clientY) => {
       const left = Math.min(startX, clientX);
@@ -8011,7 +8050,7 @@ function FloatingBoard({
       const bottom = Math.max(startY, clientY);
       setSelectionBox({ left, top, width: right - left, height: bottom - top });
 
-      const nextSelectedIds = items
+      const hitIds = items
         .filter((item) => {
           const itemLeft = viewportOffset.x + item.x * zoom;
           const itemTop = viewportOffset.y + item.y * zoom;
@@ -8021,11 +8060,16 @@ function FloatingBoard({
         })
         .map((item) => item.id);
 
-      setSelectedFloatingIds(new Set(nextSelectedIds));
+      setSelectedFloatingIds(combineSelection(baseSelection, hitIds, selectionModifierFromEvent(liveModifiers)));
     };
 
     const move = (moveEvent) => {
       if (draggingWindow) return;
+      if (!onWindowChrome) {
+        liveModifiers.shiftKey = moveEvent.shiftKey;
+        liveModifiers.ctrlKey = moveEvent.ctrlKey;
+        liveModifiers.metaKey = moveEvent.metaKey;
+      }
       const dx = moveEvent.clientX - startX;
       const dy = moveEvent.clientY - startY;
       if (!selecting && Math.hypot(dx, dy) > 5) {
@@ -8043,20 +8087,22 @@ function FloatingBoard({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
       window.removeEventListener("mouseup", stop);
-      if (!selecting && !draggingWindow) {
+      if (!selecting && !draggingWindow && selectionModifierFromEvent(liveModifiers) === "replace") {
         setSelectedFloatingIds(new Set());
       }
       setSelectionBox(null);
     };
 
-    windowDragTimerRef.current = window.setTimeout(async () => {
-      const nextDrag = await window.referenceBoard?.beginWindowDrag?.();
-      if (nextDrag) {
-        draggingWindow = true;
-        setSelectionBox(null);
-        setWindowDragState(nextDrag);
-      }
-    }, 180);
+    if (onWindowChrome || !startsModified) {
+      windowDragTimerRef.current = window.setTimeout(async () => {
+        const nextDrag = await window.referenceBoard?.beginWindowDrag?.();
+        if (nextDrag) {
+          draggingWindow = true;
+          setSelectionBox(null);
+          setWindowDragState(nextDrag);
+        }
+      }, 180);
+    }
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", stop);
     window.addEventListener("mouseup", stop);
@@ -8137,11 +8183,41 @@ function FloatingBoard({
     if (typeof actual === "boolean") setAlwaysOnTop(actual);
   }
 
+  function applyFloatingSelectionModifier(modifier, itemId) {
+    setSelectedFloatingIds((current) => {
+      const next = new Set(current);
+      if (modifier === "add") next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }
+
+  // 整组选框会盖住组内素材，修饰键点选需要按坐标命中最上层素材。
+  function floatingItemAtClientPoint(clientX, clientY) {
+    const boardX = (clientX - viewportOffset.x) / zoom;
+    const boardY = (clientY - viewportOffset.y) / zoom;
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
+      if (boardX >= item.x && boardX <= item.x + item.width && boardY >= item.y && boardY <= item.y + item.height) return item;
+    }
+    return null;
+  }
+
   function startFloatingDrag(event, item) {
     if (event.button !== 0) return;
     if (editingNoteId === item.id) return;
     event.stopPropagation();
     floatingShellRef.current?.focus?.({ preventScroll: true });
+    const modifier = selectionModifierFromEvent(event);
+    if (modifier !== "replace") {
+      setContextMenu(null);
+      applyFloatingSelectionModifier(modifier, item.id);
+      return;
+    }
+    beginFloatingItemDrag(event, item);
+  }
+
+  function beginFloatingItemDrag(event, item) {
     setEditingNoteId("");
     setContextMenu(null);
     checkpointBoardItems(board.id);
@@ -8175,7 +8251,19 @@ function FloatingBoard({
 
   function startFloatingGroupDrag(event) {
     if (event.button !== 0 || selectedFloatingItems.length < 2) return;
-    startFloatingDrag(event, selectedFloatingItems[0]);
+    // 按住 Shift / Ctrl 时只调整选区：点到组内素材按素材加选/减选，空白处让位给框选。
+    const modifier = selectionModifierFromEvent(event);
+    if (modifier !== "replace") {
+      const hitItem = floatingItemAtClientPoint(event.clientX, event.clientY);
+      if (hitItem) {
+        setContextMenu(null);
+        applyFloatingSelectionModifier(modifier, hitItem.id);
+      }
+      return;
+    }
+    event.stopPropagation();
+    floatingShellRef.current?.focus?.({ preventScroll: true });
+    beginFloatingItemDrag(event, selectedFloatingItems[0]);
   }
 
   function startFloatingResize(event, item, handle = "se") {
