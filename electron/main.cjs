@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, ipcMain, shell, screen, dialog, nativeImage, c
 const { execFile, execFileSync } = require("node:child_process");
 const crypto = require("node:crypto");
 const fs = require("node:fs");
+const fsp = require("node:fs/promises");
 const http = require("node:http");
 const path = require("node:path");
 const { Readable } = require("node:stream");
@@ -276,7 +277,8 @@ function ensureLibraryDir(folderName = "未分类") {
   return libraryDir;
 }
 
-function uniqueLibraryPath(sourcePath, folderName) {
+// reservedPaths 用于“先分配路径、后并发写入”的调用方：文件名登记后就能挡住同批次的同名文件。
+function uniqueLibraryPath(sourcePath, folderName, reservedPaths) {
   const targetDir = ensureLibraryDir(folderName);
   const parsed = path.parse(sourcePath);
   const baseName = sanitizePathPart(parsed.name);
@@ -284,11 +286,12 @@ function uniqueLibraryPath(sourcePath, folderName) {
   let targetPath = path.join(targetDir, `${baseName}${ext}`);
   let index = 1;
 
-  while (fs.existsSync(targetPath)) {
+  while (fs.existsSync(targetPath) || reservedPaths?.has(targetPath.toLowerCase())) {
     targetPath = path.join(targetDir, `${baseName}-${index}${ext}`);
     index += 1;
   }
 
+  reservedPaths?.add(targetPath.toLowerCase());
   return targetPath;
 }
 
@@ -367,7 +370,8 @@ function createImageThumbnail(filePath, requestedMaxDimension = 640) {
 function createLibraryAsset(targetPath, index = 0, type = "导入", originalSource = "", note = "已复制到软件素材库。", tags = ["本地"], extra = {}) {
   const stats = fs.statSync(targetPath);
   const importedAt = new Date().toLocaleString("zh-CN", { hour12: false });
-  const dimensions = readImageDimensions(targetPath);
+  // 调用方已经给了宽高（例如 Eagle 素材库自带）就不再解码图片。
+  const dimensions = extra.pixelWidth && extra.pixelHeight ? null : readImageDimensions(targetPath);
 
   return {
     id: `library-${Date.now()}-${index}-${crypto.randomUUID()}`,
@@ -707,9 +711,9 @@ function importPathsToLibrary(filePaths, folderName = "未分类", type = "导�
 // images/<itemId>.info/ 下放原始文件和同名 metadata.json，随附 <名称>_thumbnail.png 缩略图。
 const eagleThumbnailPattern = /_thumbnail\.(png|jpe?g|webp|gif)$/i;
 
-function readJsonFile(filePath) {
+async function readJsonFile(filePath) {
   try {
-    const raw = fs.readFileSync(filePath);
+    const raw = await fsp.readFile(filePath);
     const text = raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf ? raw.subarray(3).toString("utf8") : raw.toString("utf8");
     return JSON.parse(text);
   } catch {
@@ -774,22 +778,43 @@ function buildEagleFolderIndex(folders) {
   return { pathsById, folderPaths };
 }
 
+// 5000+ 个素材的库在机械盘、网络盘或带实时扫描的杀毒软件下，单个文件的读取延迟就可能到 10ms，
+// 串行读 metadata.json 会让索引卡上几十秒，因此读取一律并发进行，并且缓存上一次的解析结果。
+const eagleScanConcurrency = 32;
+const eagleCopyConcurrency = 8;
+const eagleIndexCache = new Map();
+
+async function mapConcurrent(items, limit, worker) {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+}
+
+// 用文件本身的 大小+修改时间 判断缓存是否仍然有效：Eagle 改写条目信息就会刷新这个签名。
+function eagleMetadataSignature(stats) {
+  return stats ? `${stats.size}:${Math.round(stats.mtimeMs)}` : "";
+}
+
+// 索引阶段不再逐条 stat 原文件：冷启动时“每条素材一次额外文件访问”就是主要开销，
+// 直接按 Eagle 记录的 名称+扩展名 拼路径，存在性留到复制/引用时校验（失败会列出并尝试目录回退）。
 function eagleItemMediaPath(infoDir, itemMetadata) {
   const itemName = String(itemMetadata?.name || "").trim();
   const ext = `.${String(itemMetadata?.ext || "").replace(/^\./, "").toLowerCase()}`;
+  if (itemName && ext.length > 1 && !/[\\/:*?"<>|]/.test(itemName)) return path.join(infoDir, `${itemName}${ext}`);
+  return "";
+}
 
-  if (itemName && ext.length > 1) {
-    const exactPath = path.join(infoDir, `${itemName}${ext}`);
-    try {
-      if (fs.statSync(exactPath).isFile()) return exactPath;
-    } catch {
-      // 名称被改过时回落到目录扫描。
-    }
-  }
-
+// 名称被 Eagle 之外的操作改过时，才退回到扫描目录（只在少数条目上发生）。
+async function eagleMediaPathFromDirectory(infoDir, ext) {
   let entries = [];
   try {
-    entries = fs.readdirSync(infoDir, { withFileTypes: true });
+    entries = await fsp.readdir(infoDir, { withFileTypes: true });
   } catch {
     return "";
   }
@@ -806,75 +831,126 @@ function eagleItemMediaPath(infoDir, itemMetadata) {
 }
 
 // 素材目录里除缩略图外还有原始文件，说明只是格式不支持，而不是文件缺失。
-function eagleHasOriginalFile(infoDir) {
+async function eagleHasOriginalFile(infoDir) {
   try {
-    return fs
-      .readdirSync(infoDir, { withFileTypes: true })
-      .some(
-        (entry) =>
-          entry.isFile() &&
-          entry.name !== "metadata.json" &&
-          !entry.name.startsWith("._") &&
-          !eagleThumbnailPattern.test(entry.name) &&
-          entry.name.toLowerCase() !== "thumbnail.png",
-      );
+    const entries = await fsp.readdir(infoDir, { withFileTypes: true });
+    return entries.some(
+      (entry) =>
+        entry.isFile() &&
+        entry.name !== "metadata.json" &&
+        !entry.name.startsWith("._") &&
+        !eagleThumbnailPattern.test(entry.name) &&
+        entry.name.toLowerCase() !== "thumbnail.png",
+    );
   } catch {
     return false;
   }
 }
 
-function scanEagleLibrary(libraryPath) {
-  const libraryMetadata = readJsonFile(path.join(libraryPath, "metadata.json"));
+// 读取单个条目的 metadata.json 并解析出素材信息；命中缓存时只做一次 stat。
+async function readEagleItem(infoDir, cachedEntry) {
+  const metadataPath = path.join(infoDir, "metadata.json");
+  let signature = "";
+  try {
+    signature = eagleMetadataSignature(await fsp.stat(metadataPath));
+  } catch {
+    signature = "";
+  }
+
+  if (cachedEntry && signature && cachedEntry.signature === signature) {
+    return { ...cachedEntry, reused: true };
+  }
+
+  const itemMetadata = (await readJsonFile(metadataPath)) || {};
+  const base = { signature, id: "", name: "", mediaPath: "", mediaKind: "", folderIds: [], tags: [], annotation: "", url: "", modifiedAt: 0 };
+
+  if (itemMetadata.isDeleted === true) {
+    return { ...base, item: null, reason: "deleted", reused: false };
+  }
+
+  const ext = `.${String(itemMetadata?.ext || "").replace(/^\./, "").toLowerCase()}`;
+  const mediaPath = eagleItemMediaPath(infoDir, itemMetadata) || (await eagleMediaPathFromDirectory(infoDir, ext));
+  if (!mediaPath) {
+    // metadata.json 损坏时靠目录内容判断：有原始文件就是格式不支持，否则是文件缺失。
+    const hasOriginal = await eagleHasOriginalFile(infoDir);
+    return { ...base, item: null, reason: hasOriginal ? "unsupported" : "unreadable", reused: false };
+  }
+  if (!isImagePath(mediaPath) && !isVideoPath(mediaPath)) {
+    return { ...base, item: null, reason: "unsupported", reused: false };
+  }
+
+  const mediaKind = mediaKindForPath(mediaPath);
+  // Eagle 已经算好宽高，图片直接用它的，省掉导入时再解码一次图片的开销。
+  const width = Math.round(Number(itemMetadata.width) || 0);
+  const height = Math.round(Number(itemMetadata.height) || 0);
+
+  const item = {
+    id: String(itemMetadata.id || path.basename(infoDir, ".info")),
+    name: String(itemMetadata.name || "").trim() || path.basename(mediaPath, path.extname(mediaPath)),
+    mediaPath,
+    mediaKind,
+    ...(mediaKind === "image" && width > 0 && height > 0 ? { pixelWidth: width, pixelHeight: height } : {}),
+    // Eagle 允许一个素材属于多个分类，这里按 Eagle 记录的顺序落在第一个分类（分类路径在扫描后按最新目录树解析）。
+    folderIds: Array.isArray(itemMetadata.folders) ? itemMetadata.folders.map((id) => String(id)) : [],
+    tags: (Array.isArray(itemMetadata.tags) ? itemMetadata.tags : [])
+      .map((tag) => String(tag).replace(/\s+/g, " ").trim())
+      .filter(Boolean),
+    annotation: String(itemMetadata.annotation || "").trim(),
+    url: String(itemMetadata.url || "").trim(),
+    modifiedAt: Number(itemMetadata.modificationTime || itemMetadata.lastModified || 0) || 0,
+  };
+
+  return { signature, item, reason: "", reused: false };
+}
+
+async function scanEagleLibrary(libraryPath, onProgress) {
+  const libraryMetadata = await readJsonFile(path.join(libraryPath, "metadata.json"));
   const folderIndex = buildEagleFolderIndex(libraryMetadata?.folders);
+  const previousCache = eagleIndexCache.get(libraryPath) ?? new Map();
+  const nextCache = new Map();
   const items = [];
-  const skipped = { deleted: 0, unsupported: 0, unreadable: 0 };
+  const skipped = { deleted: 0, unsupported: 0, unreadable: 0, reused: 0 };
 
   let entries = [];
   try {
-    entries = fs.readdirSync(path.join(libraryPath, "images"), { withFileTypes: true });
+    entries = await fsp.readdir(path.join(libraryPath, "images"), { withFileTypes: true });
   } catch {
     entries = [];
   }
 
-  entries.forEach((entry) => {
-    if (!entry.isDirectory() || !entry.name.toLowerCase().endsWith(".info")) return;
+  const infoDirNames = entries.filter((entry) => entry.isDirectory() && entry.name.toLowerCase().endsWith(".info")).map((entry) => entry.name);
+  const parsed = new Array(infoDirNames.length);
+  let done = 0;
 
-    const infoDir = path.join(libraryPath, "images", entry.name);
-    const itemMetadata = readJsonFile(path.join(infoDir, "metadata.json")) || {};
-    if (itemMetadata.isDeleted === true) {
-      skipped.deleted += 1;
-      return;
+  await mapConcurrent(infoDirNames, eagleScanConcurrency, async (name, index) => {
+    const infoDir = path.join(libraryPath, "images", name);
+    let result;
+    try {
+      result = await readEagleItem(infoDir, previousCache.get(infoDir));
+    } catch {
+      result = { signature: "", item: null, reason: "unreadable", reused: false };
     }
-
-    const mediaPath = eagleItemMediaPath(infoDir, itemMetadata);
-    if (!mediaPath) {
-      // metadata.json 损坏时靠目录内容判断：有原始文件就是格式不支持，否则是文件缺失。
-      if (eagleHasOriginalFile(infoDir)) skipped.unsupported += 1;
-      else skipped.unreadable += 1;
-      return;
-    }
-    if (!isImagePath(mediaPath) && !isVideoPath(mediaPath)) {
-      skipped.unsupported += 1;
-      return;
-    }
-
-    const folderIds = Array.isArray(itemMetadata.folders) ? itemMetadata.folders.map((id) => String(id)) : [];
-    items.push({
-      id: String(itemMetadata.id || path.basename(entry.name, ".info")),
-      name: String(itemMetadata.name || "").trim() || path.basename(mediaPath, path.extname(mediaPath)),
-      mediaPath,
-      mediaKind: mediaKindForPath(mediaPath),
-      // Eagle 允许一个素材属于多个分类，这里按 Eagle 记录的顺序落在第一个分类。
-      folder: folderIds.map((id) => folderIndex.pathsById.get(id)).find(Boolean) || "",
-      tags: (Array.isArray(itemMetadata.tags) ? itemMetadata.tags : [])
-        .map((tag) => String(tag).replace(/\s+/g, " ").trim())
-        .filter(Boolean),
-      annotation: String(itemMetadata.annotation || "").trim(),
-      url: String(itemMetadata.url || "").trim(),
-      modifiedAt: Number(itemMetadata.modificationTime || itemMetadata.lastModified || 0) || 0,
-    });
+    parsed[index] = { infoDir, result };
+    done += 1;
+    if (done % eagleScanConcurrency === 0 || done === infoDirNames.length) onProgress?.(done, infoDirNames.length);
   });
 
+  parsed.forEach(({ infoDir, result }) => {
+    // 解析失败的条目不写缓存，下次扫描会重试。
+    if (result.item) {
+      if (result.signature) nextCache.set(infoDir, result);
+      items.push({
+        ...result.item,
+        folder: result.item.folderIds.map((id) => folderIndex.pathsById.get(id)).find(Boolean) || "",
+      });
+      if (result.reused) skipped.reused += 1;
+      return;
+    }
+    skipped[result.reason] = (skipped[result.reason] ?? 0) + 1;
+    if (result.reason !== "unreadable" && result.signature) nextCache.set(infoDir, result);
+  });
+
+  eagleIndexCache.set(libraryPath, nextCache);
   items.sort((left, right) => right.modifiedAt - left.modifiedAt || left.name.localeCompare(right.name, "zh-Hans-CN"));
   return { folderIndex, items, skipped };
 }
@@ -887,43 +963,82 @@ function eagleAssetNote(libraryName, importMode, annotation) {
   return annotation ? `${base}备注：${annotation}` : base;
 }
 
-function importEagleLibraryItems(items, { libraryName, importMode, existingEagleIds, onProgress }) {
+async function importEagleLibraryItems(items, { libraryName, importMode, existingEagleIds, onProgress }) {
   const shouldReference = importMode === "reference";
   const existing = new Set(Array.isArray(existingEagleIds) ? existingEagleIds.map((id) => String(id)) : []);
-  const assets = [];
+  const assets = new Array(items.length).fill(null);
   const failed = [];
   let skippedExisting = 0;
 
+  // 先串行分配库内目标路径：同名文件的后缀编号由这一步定下来，后面的并发复制不会互相覆盖。
+  const jobs = [];
+  const reservedPaths = new Set();
   items.forEach((item, index) => {
     if (existing.has(item.id)) {
       skippedExisting += 1;
-      onProgress?.(index + 1, items.length, item.name);
       return;
     }
-
     try {
-      const imported = shouldReference
-        ? referenceMediaFromPath(item.mediaPath, item.folder, index, "Eagle 引用")
-        : item.mediaKind === "video"
-          ? copyVideoToLibrary(item.mediaPath, item.folder, index, "Eagle 素材")
-          : copyImageToLibrary(item.mediaPath, item.folder, index, "Eagle 素材");
-
-      assets.push({
-        ...imported,
-        title: item.name,
-        tags: Array.from(new Set(["Eagle", ...item.tags, ...(item.mediaKind === "video" ? ["视频"] : [])])),
-        note: eagleAssetNote(libraryName, importMode, item.annotation),
-        eagleId: item.id,
-        ...(item.url ? { remoteSource: item.url } : {}),
-      });
+      jobs.push({ index, item, targetPath: shouldReference ? item.mediaPath : uniqueLibraryPath(item.mediaPath, item.folder, reservedPaths) });
     } catch (error) {
       failed.push({ id: item.id, name: item.name, reason: String(error?.message || error) });
     }
-
-    onProgress?.(index + 1, items.length, item.name);
   });
 
-  return { assets, failed, skippedExisting };
+  let done = skippedExisting + failed.length;
+  onProgress?.(done, items.length, "");
+
+  await mapConcurrent(jobs, eagleCopyConcurrency, async (job) => {
+    const { item, index, targetPath } = job;
+    try {
+      let sourcePath = item.mediaPath;
+      if (shouldReference) {
+        // 引用模式必须确认原文件在，否则会留下失效引用。
+        try {
+          await fsp.stat(sourcePath);
+        } catch {
+          sourcePath = await eagleMediaPathFromDirectory(path.dirname(item.mediaPath), path.extname(item.mediaPath));
+          if (!sourcePath) throw new Error("找不到 Eagle 里的原始文件");
+        }
+      } else {
+        try {
+          await fsp.copyFile(sourcePath, targetPath);
+        } catch (error) {
+          // 名称在 Eagle 之外被改过时才回退扫描目录，重试一次。
+          const fallback = await eagleMediaPathFromDirectory(path.dirname(item.mediaPath), path.extname(item.mediaPath));
+          if (!fallback || fallback.toLowerCase() === sourcePath.toLowerCase()) throw error;
+          await fsp.copyFile(fallback, targetPath);
+          sourcePath = fallback;
+        }
+      }
+
+      const tags = Array.from(new Set(["Eagle", ...item.tags, ...(item.mediaKind === "video" ? ["视频"] : [])]));
+      const extra = {
+        folder: item.folder,
+        title: item.name,
+        eagleId: item.id,
+        ...(item.pixelWidth && item.pixelHeight
+          ? { pixelWidth: item.pixelWidth, pixelHeight: item.pixelHeight, dimensions: `${item.pixelWidth} x ${item.pixelHeight}` }
+          : {}),
+        ...(shouldReference ? { libraryCopy: false, referencedSource: true } : {}),
+        ...(item.url ? { remoteSource: item.url } : {}),
+      };
+      const note = eagleAssetNote(libraryName, importMode, item.annotation);
+      const typeLabel = shouldReference ? "Eagle 引用" : "Eagle 素材";
+      const assetSourcePath = shouldReference ? sourcePath : targetPath;
+
+      assets[index] =
+        item.mediaKind === "video"
+          ? createVideoLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, note, tags, extra)
+          : createLibraryAsset(assetSourcePath, index, typeLabel, sourcePath, note, tags, extra);
+    } catch (error) {
+      failed.push({ id: item.id, name: item.name, reason: String(error?.message || error) });
+    }
+    done += 1;
+    onProgress?.(done, items.length, item.name);
+  });
+
+  return { assets: assets.filter(Boolean), failed, skippedExisting };
 }
 
 function extensionFromContentType(contentType = "") {
@@ -2279,22 +2394,23 @@ app.whenReady().then(() => {
     const libraryName = path.basename(libraryPath).replace(/\.library$/i, "") || "Eagle";
     const mode = importMode === "reference" ? "reference" : "copy";
     let lastProgressAt = 0;
-    const sendProgress = (phase, done, total, current = "") => {
+    const sendProgress = (phase, done, total, current = "", extra = {}) => {
       if (event.sender.isDestroyed()) return;
       const now = Date.now();
-      if (phase === "copy" && done < total && now - lastProgressAt < 80) return;
+      // 进度只用来安抚等待，80ms 一次足够，避免大量小文件时刷爆 IPC。
+      if (done < total && now - lastProgressAt < 80) return;
       lastProgressAt = now;
-      event.sender.send("eagle-import-progress", { phase, done, total, current });
+      event.sender.send("eagle-import-progress", { phase, done, total, current, ...extra });
     };
 
     try {
       sendProgress("scan", 0, 0);
-      const { folderIndex, items, skipped } = scanEagleLibrary(libraryPath);
-      const imported = importEagleLibraryItems(items, {
+      const { folderIndex, items, skipped } = await scanEagleLibrary(libraryPath, (done, total) => sendProgress("scan", done, total));
+      const imported = await importEagleLibraryItems(items, {
         libraryName,
         importMode: mode,
         existingEagleIds,
-        onProgress: (done, total, current) => sendProgress("copy", done, total, current),
+        onProgress: (done, total, current) => sendProgress("copy", done, total, current, { reused: skipped.reused }),
       });
 
       return {

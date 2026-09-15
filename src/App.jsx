@@ -6261,10 +6261,15 @@ function Workspace({
             <div>
               <strong>{eagleImport.phase === "scan" ? "正在识别 Eagle 素材库结构" : "正在导入 Eagle 素材库"}</strong>
               <p>
-                {eagleImport.total > 0 ? `${eagleImport.done} / ${eagleImport.total}` : "读取分类与素材清单"}
+                {eagleImport.total > 0
+                  ? `${eagleImport.done} / ${eagleImport.total}${eagleImport.phase === "scan" ? " 个素材" : ""}`
+                  : "读取分类与素材清单"}
                 {eagleImport.current ? ` · ${eagleImport.current}` : ""}
               </p>
-              <small>{activeImportMode === "reference" ? "引用原文件：不复制 Eagle 里的素材" : "复制副本：素材会复制到当前素材库"}</small>
+              <small>
+                {activeImportMode === "reference" ? "引用原文件：不复制 Eagle 里的素材" : "复制副本：素材会复制到当前素材库"}
+                {eagleImport.reused > 0 ? ` · 复用上次索引 ${eagleImport.reused} 项` : ""}
+              </small>
             </div>
           </div>
         </div>
